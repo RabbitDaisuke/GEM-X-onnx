@@ -173,6 +173,9 @@ def choose_weights_dir(root, override=None):
     path = os.path.join(root, "weights")
     log(f"weights go to {path}")
     return path
+
+
+def cleanup_disk():
     """Free disk on a fresh Codespace (32 GB disk, ~11 GB free).
 
     A fresh Codespace's base image holds ~21 GB of preinstalled
@@ -530,6 +533,42 @@ def summary(root):
           "--saveEngine=hand_fp16.trt --memPoolSize=tacticSharedMem:48K")
 
 
+def check_defined_names():
+    """Every bare Name called as a function must be defined in this
+    file, imported, or a builtin. Catches the `cleanup_disk` class of
+    bug: called in main() but never defined (it hid as dead code after
+    a `return` inside another function, which py_compile cannot see).
+    Returns a list of undefined names (empty = OK).
+    """
+    import ast
+    import builtins
+    tree = ast.parse(open(os.path.abspath(__file__),
+                          encoding="utf-8").read())
+    defined = set(dir(builtins))
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)):
+            defined.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    defined.add(target.id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(
+                node.target, ast.Name):
+            defined.add(node.target.id)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                defined.add((alias.asname or alias.name).split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                defined.add(alias.asname or alias.name)
+    called = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            called.add(node.func.id)
+    return sorted(called - defined)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="GEM-X FP16 + ONNX export on a 16 GB Codespace.")
@@ -582,6 +621,13 @@ def main(argv=None):
     if not preflight():
         return 2
     if args.self_test:
+        missing = check_defined_names()
+        if missing:
+            print(f"ERROR: called but never defined: {missing}. "
+                  "Fix the script before running it for real.",
+                  file=sys.stderr)
+            return 2
+        log("self-test: all called names are defined")
         run([sys.executable,
              os.path.join(tools_dir, "export_onnx_real.py"), "--self-test"],
             check=True)
