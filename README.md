@@ -62,6 +62,16 @@ EgoHand のログインなしダウンロードが 401/403 で失敗する場合
 - `python3 run_gemx_onnx.py --keep-weights --keep-fp32-onnx`：全部残す。両方付けると ~30GB 要る。Codespace のディスクは 32GB なので、片方だけ残すのが無難。
 - `python3 run_gemx_onnx.py --self-test`：環境確認だけ。ダウンロードなし。
 
+### Hugging Face に push する
+
+終わったあと `out/` を Hugging Face のモデルリポジトリに上げる。トークンは引数で渡す（`--hf-token`、なければ `HF_TOKEN` 環境変数）。ログにトークンは出ない（`***` でマスクされる）。
+
+```
+python3 run_gemx_onnx.py --hf-push RabbitDaisuke/gemx-onnx-fp16 --hf-token $HF_TOKEN
+```
+
+リポジトリがなければ作られる。`out/README.md`（モデルカード）も一緒に上がる。上がるのは FP16 ONNX・FP16 チェックポイント・ログだけ。FP32 ONNX は含まれない。
+
 ## 失敗したとき
 
 そのステップのログ全文が結果。`out/body_fp16.onnx` ができるまでは「エクスポート成功」とは言わない。ログを貼って相談すること。

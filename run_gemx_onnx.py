@@ -6,7 +6,16 @@ Usage (in a GitHub Codespace created from this repo, 4-core / 16 GB machine):
     python3 run_gemx_onnx.py            # Body + Hand, end to end
     python3 run_gemx_onnx.py --task body
     python3 run_gemx_onnx.py --task hand --keep-weights --keep-fp32-onnx
+    python3 run_gemx_onnx.py --hf-push RabbitDaisuke/gemx-onnx-fp16 --hf-token $HF_TOKEN
     python3 run_gemx_onnx.py --self-test   # preflight only, no downloads
+
+Hugging Face push (--hf-push): after both models are done, the script
+writes a model card into out/README.md, creates the HF repo if needed,
+and uploads out/ with `hf upload --token <token>`. The token is taken
+from --hf-token, or from the HF_TOKEN environment variable. It is passed
+explicitly as a --token argument (the hf CLI does not pick it up
+reliably otherwise) and is NEVER printed: log lines mask it as ***.
+Do not paste the token into a shared log; prefer a Codespace secret.
 
 What it does, in order, one model at a time (Body, then Hand):
   1. Preflight: Python version, RAM, free disk. Warns, does not guess.
@@ -94,8 +103,12 @@ def log_disk():
     log(f"disk free: {gb(usage.free):.1f} GB")
 
 
-def run(cmd, *, check=True, env=None):
-    log("$ " + " ".join(str(c) for c in cmd))
+def run(cmd, *, check=True, env=None, redact=()):
+    shown = " ".join(str(c) for c in cmd)
+    for secret in redact:
+        if secret:
+            shown = shown.replace(secret, "***")
+    log("$ " + shown)
     return subprocess.run(cmd, check=check, env=env)
 
 
@@ -213,7 +226,8 @@ def download(task, spec, root, tools_dir):
         if task == "hand" and token:
             log("No-login download failed, retrying with HF_TOKEN ...")
             run(["hf", "download", spec["repo"], ckpt,
-                 "--local-dir", "weights"], check=True)
+                 "--local-dir", "weights", "--token", token],
+                check=True, redact=(token,))
         else:
             print("ERROR: download failed. For EgoHand, set HF_TOKEN "
                   "(Codespace secret or export HF_TOKEN=...) and re-run.",
@@ -289,6 +303,58 @@ def run_task(task, spec, root, tools_dir, args):
     log_disk()
 
 
+def push_to_hf(repo_id, token, out_dir):
+    """Upload out/ to a Hugging Face model repo (token via --token).
+
+    Writes a model card into out/README.md first, creates the repo if
+    it does not exist, then uploads the whole out/ folder. The token is
+    passed explicitly as --token and masked as *** in every log line.
+    """
+    card = f"""---
+license: other
+---
+
+# GEM-X ONNX (FP16)
+
+GEM-X Body / Hand models exported to ONNX (FP16) from
+[NVlabs/GEM-X](https://github.com/NVlabs/GEM-X) commit `{GEMX_REF}`,
+by `run_gemx_onnx.py` on a GitHub Codespace (CPU).
+
+## Files
+
+- `body_fp16.onnx` / `hand_fp16.onnx` — FP16 ONNX, `PoseModel.encode()` boundary.
+- `body_fp16.safetensors` / `hand_fp16.safetensors` — FP16-cast checkpoints.
+- `inspect_*.txt`, `export_*.log`, `quantize_*.log` — inspect / compare / quantize logs.
+- FP32 ONNX files are NOT included (deleted after AutoCast to fit the 32 GB disk).
+
+## Licenses
+
+- Body weights: NVIDIA Open Model License (commercial OK per the model card).
+- Hand weights: OpenMDW 1.1 (commercial OK per the model card).
+- This export tooling: Apache 2.0.
+- YOLOX-X HumanArt detector is NOT included (commercial-use status unverified).
+
+## Next step
+
+Build TensorRT-RTX engines on a GPU machine (RTX 4070 Ti SUPER, CUDA 13.4,
+TensorRT-RTX 1.7.1.116):
+
+```
+tensorrt_rtx --onnx=body_fp16.onnx --saveEngine=body_fp16.trt --memPoolSize=tacticSharedMem:48K
+tensorrt_rtx --onnx=hand_fp16.onnx --saveEngine=hand_fp16.trt --memPoolSize=tacticSharedMem:48K
+```
+"""
+    with open(os.path.join(out_dir, "README.md"), "w",
+              encoding="utf-8") as fh:
+        fh.write(card)
+    log(f"pushing out/ to https://huggingface.co/{repo_id}")
+    run(["hf", "repo", "create", repo_id, "--type", "model",
+         "--exist-ok", "--token", token], check=True, redact=(token,))
+    run(["hf", "upload", repo_id, out_dir, "--token", token],
+        check=True, redact=(token,))
+    log(f"pushed: https://huggingface.co/{repo_id}")
+
+
 def summary(root):
     log("== done. out/ ==")
     total = 0
@@ -316,6 +382,13 @@ def main(argv=None):
                     help="keep the FP32 ONNX files in out/")
     ap.add_argument("--skip-quantize", action="store_true",
                     help="skip the FP16 checkpoint cast")
+    ap.add_argument("--hf-push", metavar="REPO_ID",
+                    help="also push out/ to a Hugging Face model repo, "
+                         "e.g. RabbitDaisuke/gemx-onnx-fp16")
+    ap.add_argument("--hf-token", metavar="TOKEN",
+                    help="Hugging Face token, passed explicitly as "
+                         "--token to the hf CLI (falls back to the "
+                         "HF_TOKEN environment variable; never logged)")
     ap.add_argument("--self-test", action="store_true",
                     help="preflight only: environment + exporter self-test")
     args = ap.parse_args(argv)
@@ -356,6 +429,13 @@ def main(argv=None):
     for task in tasks:
         run_task(task, TASKS[task], root, tools_dir, args)
     summary(root)
+    if args.hf_push:
+        token = args.hf_token or os.environ.get("HF_TOKEN")
+        if not token:
+            print("ERROR: --hf-push needs a token: pass --hf-token "
+                  "or set HF_TOKEN.", file=sys.stderr)
+            return 2
+        push_to_hf(args.hf_push, token, "out")
     return 0
 
 
