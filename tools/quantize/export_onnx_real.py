@@ -423,6 +423,9 @@ def autocast_fp16(fp32_path, fp16_path):
         print(f"Saved FP16 ONNX: {fp16_path}")
         return True
     print(proc.stderr)
+    print(f"autocast returncode: {proc.returncode} "
+          "(negative = killed by a signal, e.g. -9 = SIGKILL, the "
+          "OOM-killer; 1 = Python exception, see stderr above)")
     print("AutoCast with reference run FAILED (see above). Retrying "
           "once with --data_max inf (skip the reference run; "
           "classification by op type + initializer range only).")
@@ -431,6 +434,9 @@ def autocast_fp16(fp32_path, fp16_path):
     print(proc.stdout)
     if proc.returncode != 0:
         print(proc.stderr)
+        print(f"autocast returncode: {proc.returncode} "
+              "(negative = killed by a signal, e.g. -9 = SIGKILL, "
+              "the OOM-killer; 1 = Python exception)")
         print("MISSING/FAILED: nvidia-modelopt AutoCast, even without "
               "the reference run. Install: pip install "
               "onnx-graphsurgeon ml_dtypes onnxslim lief polygraphy")
@@ -529,6 +535,16 @@ def main(argv=None):
               "Report the failing op name; do not claim the export works.")
         raise
     if args.fp16_output:
+        # Free the loaded torch model BEFORE the autocast subprocess:
+        # the parent holds the Body (~3.5GB) / Hand (~10.7GB) weights
+        # in RAM while the child loads the 3.4GB ONNX + converts in
+        # memory. On a 16GB machine that double-residency can get the
+        # child OOM-killed with no traceback at all (returncode -9) —
+        # which matches the silent failures seen so far. The model is
+        # not used after export_onnx returns.
+        del model
+        import gc
+        gc.collect()
         if not autocast_fp16(args.output, args.fp16_output):
             return 2
         names = BODY_OUTPUTS if args.task == "body" else HAND_OUTPUTS
