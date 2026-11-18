@@ -1,0 +1,149 @@
+# GEM-X ONNX export on GitHub Actions (CPU) — NOT on the user's PC
+#
+# What this does (all CPU, all distributable public data):
+#   1. Clones NVlabs/GEM-X at commit 4aef145 (public repo).
+#   2. Sets up Python 3.11 + CPU torch + GEM-X deps (pip install -e ".[hand]"
+#      equivalent, but torch is installed from the CPU wheel first so the
+#      runner does not download the multi-GB CUDA bundle).
+#   3. Downloads weights with tools/quantize/hf_download.py (no login first):
+#      body_s240000.ckpt + body_config.json, egohand_s060000.ckpt,
+#      hand_detector.onnx. If EgoHand answers 401/403, the step retries with
+#      the `hf` CLI using the HF_TOKEN secret (add it in repo Settings >
+#      Secrets if the no-login path stops working).
+#   4. Inspects both checkpoints, exports Body then Hand ONNX with
+#      tools/quantize/export_onnx_real.py (--compare, --fp16-output),
+#      and FP16-casts the checkpoints themselves.
+#   5. Uploads the ONNX files + logs as workflow artifacts.
+#
+# What this does NOT do (honest limit):
+#   - TensorRT-RTX engine build (--memPoolSize=tacticSharedMem:48K) and SCG
+#     inference: GitHub-hosted runners have NO NVIDIA GPU. That step stays on
+#     the Windows PC (RTX 4070 Ti SUPER) with CUDA 13.4 + TensorRT-RTX 1.7.1.116.
+#   - Real latency / VRAM measurement, real camera, SlimeVR/SteamVR checks.
+#
+# How to use:
+#   1. Create a GitHub repo, push this whole gemx-vr-bridge-new/ folder to it.
+#   2. GitHub web UI: Actions tab -> "GEM-X ONNX export (CPU)" -> Run workflow.
+#   3. Wait (CPU export of two ~840M models takes a while; timeout is 6h).
+#   4. Download the artifacts from the finished run: gemx-onnx + gemx-reports.
+#   5. If a step fails, the log IS the result — paste the failing step's full
+#      log back; do not claim the export works until body_fp32.onnx exists
+#      and the --compare max-abs-error is in the log.
+#
+# Cost note: GitHub-hosted ubuntu runners are free for public repos (with the
+# usual free-tier minutes/storage limits). The ONNX artifacts are large
+# (FP32 ~3.5GB each, FP16 ~1.8GB each); artifact retention here is 7 days.
+
+name: GEM-X ONNX export (CPU)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/gemx-onnx.yml"
+      - "tools/quantize/**"
+
+permissions:
+  contents: read
+
+jobs:
+  export-onnx:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      GEMX_REF: 4aef1452e5df171deff4f293c08e643eb450981e
+    steps:
+      - name: Check out this project
+        uses: actions/checkout@v4
+
+      - name: Clone NVlabs/GEM-X
+        run: |
+          git clone --depth 1 https://github.com/NVlabs/GEM-X.git GEM-X
+          cd GEM-X && git rev-parse HEAD && test "$(git rev-parse HEAD)" = "$GEMX_REF"
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install CPU torch first (avoid the CUDA bundle on a CPU runner)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "torch>=2.10,<3" --index-url https://download.pytorch.org/whl/cpu
+          python -c "import torch; print(torch.__version__, 'cuda:', torch.cuda.is_available())"
+
+      - name: Install GEM-X deps (no torch reinstall)
+        run: |
+          python -m pip install "transformers==5.3.0" "py-soma-x==0.3.3" \
+            "numpy>=1.26,<3" "scipy>=1.11,<2" "einops>=0.8,<1" \
+            "pillow>=10,<13" "opencv-python-headless>=4.10,<5" \
+            "omegaconf>=2.3,<2.4" "onnx" "onnxruntime>=1.20,<2" \
+            "nvidia-modelopt" "huggingface_hub"
+          python -m pip install --no-deps --no-build-isolation -e GEM-X
+          python -c "import gem; print('gem ok')"
+
+      - name: List HF repos (no login)
+        run: |
+          python tools/quantize/hf_download.py --list nvidia/GEM-X
+          python tools/quantize/hf_download.py --list nvidia/EgoHand-v1
+          python tools/quantize/hf_download.py --list nvidia/RT-DETR-Hand-Detector-v1
+
+      - name: Download weights (no login first; HF_TOKEN fallback for EgoHand)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -e
+          python tools/quantize/hf_download.py --file body_s240000.ckpt,body_config.json --out-dir weights
+          python tools/quantize/hf_download.py --repo nvidia/RT-DETR-Hand-Detector-v1 --file hand_detector.onnx --out-dir weights
+          if ! python tools/quantize/hf_download.py --repo nvidia/EgoHand-v1 --file egohand_s060000.ckpt --out-dir weights; then
+            echo "No-login EgoHand download failed."
+            if [ -n "$HF_TOKEN" ]; then
+              echo "Retrying with HF_TOKEN secret..."
+              hf download nvidia/EgoHand-v1 egohand_s060000.ckpt --local-dir weights
+            else
+              echo "Add a HF_TOKEN secret (repo Settings > Secrets) for a granted account, then re-run."
+              exit 1
+            fi
+          fi
+          ls -lh weights/
+
+      - name: Inspect checkpoints
+        run: |
+          mkdir -p out
+          python tools/quantize/inspect_ckpt.py weights/body_s240000.ckpt | tee out/inspect_body.txt
+          python tools/quantize/inspect_ckpt.py weights/egohand_s060000.ckpt | tee out/inspect_hand.txt
+
+      - name: Export Body ONNX (FP32 + FP16, compare)
+        run: |
+          python tools/quantize/export_onnx_real.py --task body \
+            --gemx-root GEM-X --checkpoint weights/body_s240000.ckpt \
+            --config weights/body_config.json \
+            --output out/body_fp32.onnx --fp16-output out/body_fp16.onnx \
+            --compare 2>&1 | tee out/export_body.log
+          ls -lh out/body_*.onnx
+
+      - name: Export Hand ONNX (FP32 + FP16, compare)
+        run: |
+          python tools/quantize/export_onnx_real.py --task hand \
+            --gemx-root GEM-X --checkpoint weights/egohand_s060000.ckpt \
+            --output out/hand_fp32.onnx --fp16-output out/hand_fp16.onnx \
+            --compare 2>&1 | tee out/export_hand.log
+          ls -lh out/hand_*.onnx
+
+      - name: FP16-cast the checkpoints themselves (CPU, no calibration)
+        run: |
+          python tools/quantize/quantize_ckpt_to_fp16.py \
+            --input weights/body_s240000.ckpt --output out/body_fp16.safetensors 2>&1 | tee out/quantize_body.log || echo "body quantize step failed - see log"
+          python tools/quantize/quantize_ckpt_to_fp16.py \
+            --input weights/egohand_s060000.ckpt --output out/hand_fp16.safetensors 2>&1 | tee out/quantize_hand.log || echo "hand quantize step failed - see log"
+          ls -lh out/
+
+      - name: Upload ONNX + weights artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gemx-onnx
+          path: out/
+          retention-days: 7
+          if-no-files-found: warn

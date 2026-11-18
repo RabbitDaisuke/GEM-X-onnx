@@ -1,0 +1,24 @@
+# Weights, models, engines, outputs — never commit these.
+weights/
+out/
+GEM-X/
+assets/
+*.ckpt
+*.pt
+*.onnx
+*.trt
+*.safetensors
+*.npz
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# OS / editor
+.DS_Store
+Thumbs.db

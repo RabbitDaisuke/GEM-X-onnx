@@ -1,0 +1,11 @@
+# CPU-only PyTorch (no CUDA needed for conversion / export).
+# On the Windows PC this is enough for everything in tools/quantize/
+# except the TensorRT-RTX engine build, which needs the GPU + CUDA 13.4.
+torch --index-url https://download.pytorch.org/whl/cpu
+safetensors
+huggingface_hub  # optional: only needed for `hf download` fallback in hf_download.py
+numpy
+onnx
+onnxruntime
+# nvidia-modelopt is installed separately (AutoCast for FP16 ONNX):
+#   pip install nvidia-modelopt
