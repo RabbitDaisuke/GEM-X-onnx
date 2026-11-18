@@ -92,12 +92,35 @@ DEPS = [
     "numpy>=1.26,<3", "scipy>=1.11,<2", "einops>=0.8,<1",
     "pillow>=10,<13", "opencv-python-headless>=4.10,<5",
     "omegaconf>=2.3,<2.4", "onnx", "onnxruntime>=1.20,<2",
+    # torch 2.15's dynamo exporter hard-requires onnxscript
+    # (torch/onnx/_internal/exporter/_core.py: `import onnxscript`)
+    # and torch does NOT install it. PyPI latest 0.7.2 (2026-11-18).
+    "onnxscript>=0.7,<0.8",
     "nvidia-modelopt", "huggingface_hub", "safetensors",
 ]
 
 
 def log(msg):
     print(f"[run_gemx_onnx] {msg}", flush=True)
+
+
+def run_logged(cmd, log_path):
+    """Run cmd with output to log_path; on failure, print the log tail.
+
+    Without this, a failing step only shows CalledProcessError and the
+    real error stays hidden inside the log file.
+    """
+    with open(log_path, "w", encoding="utf-8") as fh:
+        proc = subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT)
+    if proc.returncode != 0:
+        print(f"FAILED: {' '.join(str(c) for c in cmd)}", file=sys.stderr)
+        print(f"--- last 40 lines of {log_path} ---", file=sys.stderr)
+        lines = open(log_path, encoding="utf-8",
+                     errors="replace").read().splitlines()
+        for line in lines[-40:]:
+            print(line, file=sys.stderr)
+        raise subprocess.CalledProcessError(proc.returncode, cmd)
+    return proc
 
 
 def log_disk():
@@ -243,6 +266,24 @@ def ensure_gemx(root):
         raise SystemExit(2)
 
 
+def venv_missing_modules(venv_py):
+    """Required importable modules missing from the venv (empty if OK).
+
+    Adding a package to DEPS is not enough: an existing .venv is reused
+    as-is, so a newly required module (e.g. onnxscript) would never be
+    installed on re-run. This check closes that gap.
+    """
+    check = ("import importlib.util as u;"
+             "mods=['torch','transformers','einops','onnx','onnxruntime',"
+             "'onnxscript','modelopt','huggingface_hub','safetensors',"
+             "'omegaconf','numpy','scipy','PIL','cv2','soma'];"
+             "print(','.join(m for m in mods if u.find_spec(m) is None))")
+    proc = subprocess.run([venv_py, "-c", check],
+                          capture_output=True, text=True)
+    out = proc.stdout.strip()
+    return out.split(",") if out else []
+
+
 def ensure_venv(root):
     """Create .venv with CPU torch + deps if torch is not importable.
 
@@ -269,6 +310,13 @@ def ensure_venv(root):
              "--no-build-isolation", "-e", os.path.join(root, "GEM-X")])
     else:
         log(".venv already exists, reusing it")
+    # Sync deps even for an existing venv: a package added to DEPS
+    # after the venv was created (onnxscript, 2026-11-18) must be
+    # installed, not silently skipped.
+    missing = venv_missing_modules(venv_py)
+    if missing:
+        log(f"Installing missing deps in .venv: {', '.join(missing)}")
+        run([venv_py, "-m", "pip", "install", "--no-cache-dir", *DEPS])
     # Re-exec this script inside the venv so every later step uses it.
     if os.environ.get("GEMX_ONNX_IN_VENV") != "1":
         log("Re-running inside .venv ...")
@@ -326,12 +374,9 @@ def run_task(task, spec, root, tools_dir, args, weights_dir):
     os.makedirs(out_dir, exist_ok=True)
 
     log(f"== {task}: inspect {ckpt_path} ==")
-    with open(os.path.join(out_dir, f"inspect_{task}.txt"), "w",
-              encoding="utf-8") as fh:
-        subprocess.run([sys.executable,
-                        os.path.join(tools_dir, "inspect_ckpt.py"),
-                        ckpt_path], stdout=fh, stderr=subprocess.STDOUT,
-                       check=True)
+    run_logged([sys.executable,
+                os.path.join(tools_dir, "inspect_ckpt.py"), ckpt_path],
+               os.path.join(out_dir, f"inspect_{task}.txt"))
 
     log(f"== {task}: export ONNX (FP32 + FP16, compare) ==")
     config_arg = (["--config", os.path.join(weights_dir, "body_config.json")]
@@ -343,10 +388,7 @@ def run_task(task, spec, root, tools_dir, args, weights_dir):
                   "--output", os.path.join(out_dir, f"{task}_fp32.onnx"),
                   "--fp16-output", os.path.join(out_dir, f"{task}_fp16.onnx"),
                   "--compare"]
-    with open(os.path.join(out_dir, f"export_{task}.log"), "w",
-              encoding="utf-8") as fh:
-        subprocess.run(export_cmd, stdout=fh, stderr=subprocess.STDOUT,
-                       check=True)
+    run_logged(export_cmd, os.path.join(out_dir, f"export_{task}.log"))
     log_path = os.path.join(out_dir, f"export_{task}.log")
     if os.path.exists(log_path):
         lines = [l for l in open(log_path, encoding="utf-8")
@@ -365,15 +407,12 @@ def run_task(task, spec, root, tools_dir, args, weights_dir):
 
     if not args.skip_quantize:
         log(f"== {task}: FP16-cast checkpoint ==")
-        with open(os.path.join(out_dir, f"quantize_{task}.log"), "w",
-                  encoding="utf-8") as fh:
-            subprocess.run([sys.executable,
-                            os.path.join(tools_dir,
-                                         "quantize_ckpt_to_fp16.py"),
-                            "--input", ckpt_path,
-                            "--output", os.path.join(
-                                out_dir, f"{task}_fp16.safetensors")],
-                           stdout=fh, stderr=subprocess.STDOUT, check=True)
+        run_logged([sys.executable,
+                    os.path.join(tools_dir, "quantize_ckpt_to_fp16.py"),
+                    "--input", ckpt_path,
+                    "--output", os.path.join(
+                        out_dir, f"{task}_fp16.safetensors")],
+                   os.path.join(out_dir, f"quantize_{task}.log"))
 
     # Free disk for the next model: the checkpoint goes now (it is
     # re-downloadable). The FP32 ONNX was already removed above.

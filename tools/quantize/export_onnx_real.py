@@ -129,6 +129,12 @@ def check_dependencies(*, need_gemx=False, gemx_root=None):
     ok = True
     ok &= _have_import("import torch; print(torch.__version__)", "torch (>=2.10,<3)")
     ok &= _have_import("import onnx; print(onnx.__version__)", "onnx")
+    # The dynamo exporter hard-requires onnxscript (torch 2.15
+    # torch/onnx/_internal/exporter/_core.py: `import onnxscript`);
+    # torch does not install it, so check it here and fail fast.
+    ok &= _have_import("import onnxscript; print(onnxscript.__version__)",
+                       "onnxscript (dynamo exporter needs it; "
+                       "pip install onnxscript)")
     ok &= _have_import("import onnxruntime; print(onnxruntime.__version__)",
                        "onnxruntime (for --compare)")
     ok &= _have_import("import einops; print(einops.__version__)", "einops")
@@ -288,11 +294,11 @@ def export_onnx(task, model, output_path, *, compare=False):
         input_names = ["img", "bbx_xys", "K_fullimg"]
         if task == "hand":
             input_names.append("ray_feats")
-        # torch >= 2.10 removed torch.onnx.dynamo_export (this script
-        # used it and broke on torch 2.15: "cannot import name
-        # 'dynamo_export'"). The supported API is
-        # torch.onnx.export(..., dynamo=True). If a future torch drops
-        # the dynamo keyword (dynamo becomes the only backend), retry
+        # torch.onnx.dynamo_export was removed in torch 2.9 (deprecated
+        # since 2.7; this script used it and broke on torch 2.15 with
+        # "cannot import name 'dynamo_export'"). The supported API is
+        # torch.onnx.export(..., dynamo=True) — dynamo defaults to True
+        # since 2.9. If a future torch drops the dynamo keyword, retry
         # without it. Only retry when the TypeError names dynamo.
         try:
             torch.onnx.export(wrapper, args, output_path,
