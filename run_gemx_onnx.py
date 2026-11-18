@@ -38,13 +38,17 @@ the tools use mmap=True (the 10.66 GB Hand checkpoint is never copied
 wholesale into RAM) and omegaconf DictConfig is allowlisted for
 weights_only loads — the two bugs that OOM-killed the old Actions run.
 
-Disk budget (Codespace disk is 32 GB — that is the hard limit):
-  .venv + deps ~1.5 GB, GEM-X clone ~0.1 GB,
-  Body peak ~10 GB, Hand peak ~21 GB (with Body's outputs kept),
-  final out/ ~7.3 GB. Fits, with headroom, as long as each model's
-  checkpoint and FP32 ONNX are deleted right after use (the default).
-  --keep-weights + --keep-fp32-onnx together need ~30 GB and do NOT
-  fit on a 32 GB disk — keep at most one of them.
+Disk budget (Codespace disk is 32 GB — that is the hard limit, and a
+fresh Codespace has only ~11 GB free on /workspaces: the base image
+eats the rest). But `df -Th` on a real Codespace (2026-11-18) shows a
+second disk: /tmp is a separate 118 GB disk with 108 GB free. So the
+downloaded checkpoints (10.7 GB for Hand) go to /tmp when it is
+roomier, and only the outputs stay in the repo (out/ peaks at ~9 GB,
+final ~7.3 GB). .venv + GEM-X clone (~1.6 GB) also stay in the repo.
+If /tmp is not roomier, weights stay in the repo and the script frees
+disk first (cleanup_disk) — then it needs ~12 GB free on each disk.
+--keep-weights + --keep-fp32-onnx together need ~30 GB and do NOT
+fit on a 32 GB disk — keep at most one of them.
 
 Cores: the 4-core machine is used fully — OMP/MKL/OpenBLAS threads are
 set to os.cpu_count() for every step (torch, onnxruntime, numpy).
@@ -74,13 +78,11 @@ TASKS = {
         "repo": "nvidia/GEM-X",
         "checkpoint": "body_s240000.ckpt",
         "extra_download": ["body_config.json"],
-        "config_arg": ["--config", "weights/body_config.json"],
     },
     "hand": {
         "repo": "nvidia/EgoHand-v1",
         "checkpoint": "egohand_s060000.ckpt",
         "extra_download": [],
-        "config_arg": [],
     },
 }
 
@@ -101,6 +103,79 @@ def log(msg):
 def log_disk():
     usage = shutil.disk_usage(".")
     log(f"disk free: {gb(usage.free):.1f} GB")
+    return gb(usage.free)
+
+
+def free_gb(path):
+    """Free GB on the filesystem holding path (walks up to existing)."""
+    while not os.path.exists(path):
+        path = os.path.dirname(path) or "/"
+    return gb(shutil.disk_usage(path).free)
+
+
+def choose_weights_dir(root, override=None):
+    """Pick where the downloaded checkpoints live.
+
+    Codespace `df -Th` (2026-11-18): /workspaces 32 GB with 19 GB
+    free, /tmp a separate 118 GB disk with 108 GB free. Checkpoints
+    (10.7 GB for Hand) go to /tmp when it is roomier; outputs stay in
+    the repo so they can be downloaded from VS Code.
+    """
+    if override:
+        log(f"weights go to {override} (--weights-dir)")
+        return override
+    repo_free = free_gb(root)
+    tmp_free = free_gb("/tmp")
+    log(f"disk free: repo {repo_free:.1f} GB, /tmp {tmp_free:.1f} GB")
+    if tmp_free > repo_free and tmp_free >= 20:
+        path = os.path.join("/tmp", "gemx-onnx-work", "weights")
+        log(f"weights go to {path} (/tmp is roomier)")
+        return path
+    path = os.path.join(root, "weights")
+    log(f"weights go to {path}")
+    return path
+    """Free disk on a fresh Codespace (32 GB disk, ~11 GB free).
+
+    A fresh Codespace's base image holds ~21 GB of preinstalled
+    toolchains this pipeline never uses. Remove the big ones, but NEVER
+    the directory holding the running Python interpreter (deleting that
+    would kill the venv built on it). Uses `sudo -n` so it fails fast
+    instead of hanging on a password prompt. Logs everything.
+    """
+    log("disk cleanup: a fresh Codespace has only ~11 GB free, "
+        "freeing unused preinstalled toolchains ...")
+    active_py = os.path.realpath(shutil.which("python3") or sys.executable)
+    log(f"active python: {active_py}")
+    candidates = [
+        "/usr/share/dotnet",       # .NET SDK, several GB
+        "/usr/local/lib/android",  # Android SDK
+        "/opt/ghc",                # Haskell toolchain
+        "/usr/lib/jvm",            # Java JDKs
+        "/opt/hostedtoolcache",    # extra Python/Node/Ruby/Go versions
+        "/opt/conda",              # conda, if present
+    ]
+    for path in candidates:
+        real = os.path.realpath(path)
+        if not os.path.exists(real):
+            continue
+        if active_py.startswith(real + os.sep) or active_py == real:
+            log(f"skip {path}: the active python lives under it")
+            continue
+        size = subprocess.run(["du", "-sh", real], capture_output=True,
+                              text=True)
+        human = size.stdout.split()[0] if size.stdout else "?"
+        log(f"removing {path} ({human}) ...")
+        subprocess.run(["sudo", "-n", "rm", "-rf", real],
+                       check=False, capture_output=True)
+    subprocess.run(["sudo", "-n", "docker", "system", "prune", "-a", "-f"],
+                   check=False, capture_output=True)
+    for cache in (os.path.expanduser("~/.cache/pip"),
+                  os.path.expanduser("~/.npm")):
+        if os.path.exists(cache):
+            log(f"removing cache {cache}")
+            shutil.rmtree(cache, ignore_errors=True)
+    log("disk cleanup done.")
+    return log_disk()
 
 
 def run(cmd, *, check=True, env=None, redact=()):
@@ -135,15 +210,11 @@ def preflight():
         log("RAM: unknown (not /proc/meminfo)")
     usage = shutil.disk_usage(".")
     log(f"Disk free: {gb(usage.free):.1f} GB (Codespace disk is 32 GB; "
-        "this pipeline peaks at ~21 GB, ~30 GB with --keep-weights "
-        "--keep-fp32-onnx)")
+        "a fresh one has only ~11 GB free — the script frees disk "
+        "automatically before the disk check, see cleanup_disk)")
     if gb(usage.free) < 18:
-        print("ERROR: less than 18 GB free disk — the Hand export will "
-              "not fit on this disk.", file=sys.stderr)
-        return False
-    if gb(usage.free) < 22:
-        print("WARNING: less than 22 GB free disk — tight for the Hand "
-              "phase.", file=sys.stderr)
+        print("NOTE: less than 18 GB free — running automatic disk "
+              "cleanup next.", file=sys.stderr)
     if shutil.which("git") is None:
         print("ERROR: git is required.", file=sys.stderr)
         return False
@@ -208,25 +279,33 @@ def ensure_venv(root):
     return venv_py
 
 
-def download(task, spec, root, tools_dir):
+def hf_bin():
+    """Path to the `hf` CLI from the current interpreter's bin dir."""
+    cand = os.path.join(os.path.dirname(sys.executable), "hf")
+    return cand if os.path.exists(cand) else "hf"
+
+
+def download(task, spec, root, tools_dir, weights_dir):
     """Download one task's weights (no login first, HF_TOKEN fallback)."""
+    os.makedirs(weights_dir, exist_ok=True)
     ckpt = spec["checkpoint"]
     dl = os.path.join(tools_dir, "hf_download.py")
     files = [ckpt, *spec["extra_download"]]
     if task == "hand":
         # Hand detector is small and needed later for gem-infer.
         run([sys.executable, dl, "--repo", "nvidia/RT-DETR-Hand-Detector-v1",
-             "--file", "hand_detector.onnx", "--out-dir", "weights"],
+             "--file", "hand_detector.onnx", "--out-dir", weights_dir],
             check=True)
     try:
         run([sys.executable, dl, "--repo", spec["repo"],
-             "--file", ",".join(files), "--out-dir", "weights"], check=True)
+             "--file", ",".join(files), "--out-dir", weights_dir],
+            check=True)
     except subprocess.CalledProcessError:
         token = os.environ.get("HF_TOKEN")
         if task == "hand" and token:
             log("No-login download failed, retrying with HF_TOKEN ...")
-            run(["hf", "download", spec["repo"], ckpt,
-                 "--local-dir", "weights", "--token", token],
+            run([hf_bin(), "download", spec["repo"], ckpt,
+                 "--local-dir", weights_dir, "--token", token],
                 check=True, redact=(token,))
         else:
             print("ERROR: download failed. For EgoHand, set HF_TOKEN "
@@ -234,15 +313,15 @@ def download(task, spec, root, tools_dir):
                   file=sys.stderr)
             raise
     for name in files:
-        path = os.path.join("weights", name)
+        path = os.path.join(weights_dir, name)
         log(f"downloaded {path}: {os.path.getsize(path) / (1024 ** 2):.0f} MB")
     log_disk()
 
 
-def run_task(task, spec, root, tools_dir, args):
+def run_task(task, spec, root, tools_dir, args, weights_dir):
     """Download -> inspect -> export ONNX -> FP16-cast one model."""
-    download(task, spec, root, tools_dir)
-    ckpt_path = os.path.join("weights", spec["checkpoint"])
+    download(task, spec, root, tools_dir, weights_dir)
+    ckpt_path = os.path.join(weights_dir, spec["checkpoint"])
     out_dir = os.path.join("out")
     os.makedirs(out_dir, exist_ok=True)
 
@@ -255,10 +334,12 @@ def run_task(task, spec, root, tools_dir, args):
                        check=True)
 
     log(f"== {task}: export ONNX (FP32 + FP16, compare) ==")
+    config_arg = (["--config", os.path.join(weights_dir, "body_config.json")]
+                  if task == "body" else [])
     export_cmd = [sys.executable,
                   os.path.join(tools_dir, "export_onnx_real.py"),
                   "--task", task, "--gemx-root", os.path.join(root, "GEM-X"),
-                  "--checkpoint", ckpt_path, *spec["config_arg"],
+                  "--checkpoint", ckpt_path, *config_arg,
                   "--output", os.path.join(out_dir, f"{task}_fp32.onnx"),
                   "--fp16-output", os.path.join(out_dir, f"{task}_fp16.onnx"),
                   "--compare"]
@@ -303,13 +384,8 @@ def run_task(task, spec, root, tools_dir, args):
     log_disk()
 
 
-def push_to_hf(repo_id, token, out_dir):
-    """Upload out/ to a Hugging Face model repo (token via --token).
-
-    Writes a model card into out/README.md first, creates the repo if
-    it does not exist, then uploads the whole out/ folder. The token is
-    passed explicitly as --token and masked as *** in every log line.
-    """
+def write_model_card(out_dir):
+    """Write the model card into out/README.md (uploaded with the files)."""
     card = f"""---
 license: other
 ---
@@ -347,10 +423,36 @@ tensorrt_rtx --onnx=hand_fp16.onnx --saveEngine=hand_fp16.trt --memPoolSize=tact
     with open(os.path.join(out_dir, "README.md"), "w",
               encoding="utf-8") as fh:
         fh.write(card)
-    log(f"pushing out/ to https://huggingface.co/{repo_id}")
-    run(["hf", "repo", "create", repo_id, "--type", "model",
+
+
+def ensure_hf_repo(repo_id, token):
+    """Create the HF model repo if it does not exist (token via --token)."""
+    run([hf_bin(), "repo", "create", repo_id, "--type", "model",
          "--exist-ok", "--token", token], check=True, redact=(token,))
-    run(["hf", "upload", repo_id, out_dir, "--token", token],
+
+
+def upload_task_files(repo_id, token, task, out_dir):
+    """Upload one finished model's files, then delete them locally.
+
+    Uploading per task (instead of everything at the end) keeps the
+    32 GB disk headroom: the Hand phase does not carry Body's 3.6 GB.
+    Logs stay local; they are uploaded at the end.
+    """
+    for name in (f"{task}_fp16.onnx", f"{task}_fp16.safetensors"):
+        path = os.path.join(out_dir, name)
+        if not os.path.exists(path):
+            continue
+        run([hf_bin(), "upload", repo_id, path, "--token", token],
+            check=True, redact=(token,))
+        log(f"uploaded + removing local {path}")
+        os.remove(path)
+        log_disk()
+
+
+def push_remaining(repo_id, token, out_dir):
+    """Upload whatever is left in out/ (model card + logs)."""
+    log(f"pushing remaining out/ to https://huggingface.co/{repo_id}")
+    run([hf_bin(), "upload", repo_id, out_dir, "--token", token],
         check=True, redact=(token,))
     log(f"pushed: https://huggingface.co/{repo_id}")
 
@@ -382,6 +484,12 @@ def main(argv=None):
                     help="keep the FP32 ONNX files in out/")
     ap.add_argument("--skip-quantize", action="store_true",
                     help="skip the FP16 checkpoint cast")
+    ap.add_argument("--no-cleanup", action="store_true",
+                    help="do not run the automatic disk cleanup "
+                         "(fresh Codespaces need it)")
+    ap.add_argument("--weights-dir", metavar="PATH",
+                    help="where to put downloaded checkpoints "
+                         "(default: auto — /tmp when it is roomier)")
     ap.add_argument("--hf-push", metavar="REPO_ID",
                     help="also push out/ to a Hugging Face model repo, "
                          "e.g. RabbitDaisuke/gemx-onnx-fp16")
@@ -423,19 +531,45 @@ def main(argv=None):
         log("self-test OK")
         return 0
 
+    # Disk: weights go to /tmp when it is roomier (108 GB free vs 19 GB
+    # on /workspaces). Check both filesystems; clean up the repo disk
+    # first if it is short, then fail loudly if either is still short.
+    weights_dir = choose_weights_dir(root, args.weights_dir)
+    if not args.no_cleanup and free_gb(root) < 15:
+        cleanup_disk()
+    repo_free = free_gb(root)
+    w_free = free_gb(weights_dir)
+    log(f"disk check: repo {repo_free:.1f} GB free (need ~12), "
+        f"weights disk {w_free:.1f} GB free (need ~12)")
+    if repo_free < 12 or w_free < 12:
+        print("ERROR: not enough free disk. Biggest dirs on /:",
+              file=sys.stderr)
+        subprocess.run("du -sh /* 2>/dev/null | sort -rh | head -n 10",
+                       shell=True)
+        return 2
+
     ensure_gemx(os.path.join(root, "GEM-X"))
     ensure_venv(root)
-    tasks = ("body", "hand") if args.task == "all" else (args.task,)
-    for task in tasks:
-        run_task(task, TASKS[task], root, tools_dir, args)
-    summary(root)
+
+    hf_token = None
     if args.hf_push:
-        token = args.hf_token or os.environ.get("HF_TOKEN")
-        if not token:
+        hf_token = args.hf_token or os.environ.get("HF_TOKEN")
+        if not hf_token:
             print("ERROR: --hf-push needs a token: pass --hf-token "
                   "or set HF_TOKEN.", file=sys.stderr)
             return 2
-        push_to_hf(args.hf_push, token, "out")
+        os.makedirs("out", exist_ok=True)
+        write_model_card("out")
+        ensure_hf_repo(args.hf_push, hf_token)
+
+    tasks = ("body", "hand") if args.task == "all" else (args.task,)
+    for task in tasks:
+        run_task(task, TASKS[task], root, tools_dir, args, weights_dir)
+        if args.hf_push:
+            upload_task_files(args.hf_push, hf_token, task, "out")
+    summary(root)
+    if args.hf_push:
+        push_remaining(args.hf_push, hf_token, "out")
     return 0
 
 
