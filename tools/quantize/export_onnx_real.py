@@ -341,19 +341,44 @@ def compare_onnx(task, wrapper, args, onnx_path, names):
 
 
 def autocast_fp16(fp32_path, fp16_path):
-    """ModelOpt AutoCast: FP32 ONNX -> FP16 ONNX, CPU, no calibration data."""
-    proc = subprocess.run(
-        [sys.executable, "-m", "modelopt.onnx.autocast",
-         "--onnx_path", fp32_path, "--output_path", fp16_path],
-        capture_output=True, text=True)
+    """ModelOpt AutoCast: FP32 ONNX -> FP16 ONNX, CPU, no calibration data.
+
+    First attempt runs the default path, which executes a reference
+    ONNX Runtime run (convert.py DEFAULT_DATA_MAX = 512, so the
+    ReferenceRunner branch is always taken) with every intermediate
+    tensor marked as an output (MARK_ALL). On a 16 GB machine that run
+    can fail — OOM or an ORT error on a large model — after the log
+    line "Running ONNX Runtime to obtain reference outputs".
+    If it fails, retry once with --data_max inf: that skips the
+    reference run entirely (nodeclassifier.run(None) handles None —
+    the IORangeRule is skipped, the InitializerRangeRule still
+    applies), so classification is by op type + initializer range
+    only. The fallback is logged loudly; it is a documented trade-off,
+    not a silent downgrade: nodes whose runtime outputs would exceed
+    the FP16 range are no longer detected. The FP16 result still needs
+    the TensorRT build + numeric check on the GPU machine.
+    """
+    cmd = [sys.executable, "-m", "modelopt.onnx.autocast",
+           "--onnx_path", fp32_path, "--output_path", fp16_path]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    print(proc.stdout)
+    if proc.returncode == 0:
+        print(f"Saved FP16 ONNX: {fp16_path}")
+        return True
+    print(proc.stderr)
+    print("AutoCast with reference run FAILED (see above). Retrying "
+          "once with --data_max inf (skip the reference run; "
+          "classification by op type + initializer range only).")
+    proc = subprocess.run(cmd + ["--data_max", "inf"],
+                          capture_output=True, text=True)
     print(proc.stdout)
     if proc.returncode != 0:
         print(proc.stderr)
-        print("MISSING/FAILED: nvidia-modelopt AutoCast. "
-              "Install: pip install onnx-graphsurgeon ml_dtypes "
-              "onnxslim lief polygraphy")
+        print("MISSING/FAILED: nvidia-modelopt AutoCast, even without "
+              "the reference run. Install: pip install "
+              "onnx-graphsurgeon ml_dtypes onnxslim lief polygraphy")
         return False
-    print(f"Saved FP16 ONNX: {fp16_path}")
+    print(f"Saved FP16 ONNX (no reference run): {fp16_path}")
     return True
 
 
