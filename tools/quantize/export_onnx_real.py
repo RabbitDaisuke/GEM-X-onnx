@@ -16,8 +16,8 @@ written against the actual NVlabs/GEM-X source (commit 4aef145):
          ``gem/pose/conditioning/ray_pe.py``) and passed in as a tensor;
       H3 dict batch input -> the export wrapper takes explicit tensors only
          (``img, bbx_xys, K_fullimg[, ray_feats]``);
-      H4 kp2d head -> excluded from the v1 Hand export (built without
-         ``kp2d_head``; its weights are stripped before the strict load);
+      H4 kp2d head -> exported as ``kp2d_mu`` and ``kp2d_presence``;
+         the translation solve itself stays outside the graph;
       H5 right-hand mirror -> preprocessing outside the graph (DLL side);
       H6 SOMA FK / camera decode -> outside the graph (DLL side, CPU/FP32);
       B3 per-layer lists -> Body uses the head's ``final_only=True`` flag
@@ -72,7 +72,8 @@ import sys
 BODY_OUTPUTS = ("body_pose", "global_orient", "identity_coeffs",
                 "scale_params", "pred_cam", "pose_token")
 HAND_OUTPUTS = ("wrist_orient", "hand_pose", "identity_coeffs",
-                "scale_params", "pred_cam", "pose_token")
+                "scale_params", "pred_cam", "pose_token",
+                "kp2d_mu", "kp2d_presence")
 
 
 def compute_ray_feats_numpy(bbx_xys, K_fullimg, *, grid_hw=(16, 16),
@@ -168,12 +169,7 @@ def check_files(checkpoint, config=None):
 # ---------------------------------------------------------------------------
 
 def load_model(task, checkpoint, gemx_root, config_path=None):
-    """Build a PoseModel from a real checkpoint. Returns (model, release).
-
-    Hand is built WITHOUT the kp2d head (blocker H4): the release config's
-    kp2d_translation is cleared and kp2d_* weights are stripped before the
-    strict load, so no unexpected-key error can hide a silent mismatch.
-    """
+    """Build the complete released PoseModel from a checkpoint."""
     sys.path.insert(0, os.path.abspath(gemx_root))
     import torch
     from gem.pose.api import (PoseReleaseConfig, body_config, build_pose_model,
@@ -187,7 +183,6 @@ def load_model(task, checkpoint, gemx_root, config_path=None):
             release = body_config()
     else:
         release = hand_config()
-        release.kp2d_translation = None  # H4: v1 export excludes the kp2d head
 
     checkpoint_data = torch.load(checkpoint, map_location="cpu",
                                  weights_only=False, mmap=True)
@@ -198,14 +193,6 @@ def load_model(task, checkpoint, gemx_root, config_path=None):
                       for k, v in state_dict.items()
                       if k.startswith("pose_model.")}
     converted = convert_pose_state_dict(state_dict, task=task)
-    if task == "hand":
-        dropped = [k for k in converted
-                   if k.startswith(("kp2d_head.", "kp2d_outcoord_loss."))]
-        for k in dropped:
-            del converted[k]
-        if dropped:
-            print(f"NOTE: stripped {len(dropped)} kp2d weights "
-                  "(H4: kp2d head is excluded from the v1 export)")
     with torch.device("meta"):
         model = build_pose_model(release)
     model.load_state_dict(converted, strict=True, assign=True)
@@ -221,8 +208,8 @@ def build_wrapper(task, model):
 
     Mirrors PoseModel.forward (gem/pose/model.py) but with flat tensor
     inputs instead of a dict (H3) and, for Body, final_only=True (B3).
-    Hand takes precomputed ray_feats as an input (H1). Auxiliary stacked
-    per-layer predictions are dropped; only the final layer is returned.
+    Hand takes precomputed ray_feats as an input (H1), and includes the
+    keypoint coordinates and presence needed by the official camera solve.
     """
     import torch
     from torch import nn
@@ -254,6 +241,9 @@ def build_wrapper(task, model):
                                   final_only=True)
             else:
                 out = m.task(features, cliff_cond=cliff, ray_feats=ray)
+                if m.kp2d_head is None:
+                    raise ValueError("Hand export requires the released kp2d head")
+                kp2d = m.kp2d_head(features)
             params = dict(out.parameters)
             # pose_token is out.token, pred_cam is out.pred_cam; the
             # parameters dict holds the rest. Rebuild in declared order:
@@ -263,6 +253,10 @@ def build_wrapper(task, model):
                     ordered.append(out.pred_cam)
                 elif name == "pose_token":
                     ordered.append(out.token)
+                elif name == "kp2d_mu":
+                    ordered.append(kp2d["mu"])
+                elif name == "kp2d_presence":
+                    ordered.append(kp2d["presence"])
                 else:
                     ordered.append(params[name])
             return tuple(ordered)

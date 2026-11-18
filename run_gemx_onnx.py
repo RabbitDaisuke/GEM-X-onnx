@@ -466,7 +466,8 @@ by `run_gemx_onnx.py` on a GitHub Codespace (CPU).
 
 ## Files
 
-- `body_fp16.onnx` / `hand_fp16.onnx` — FP16 ONNX, `PoseModel.encode()` boundary.
+- `body_fp16.onnx` / `hand_fp16.onnx` — FP16 ONNX, pose parameters and token;
+  Hand also exports `kp2d_mu` and `kp2d_presence` for the camera solve.
 - `body_fp16.safetensors` / `hand_fp16.safetensors` — FP16-cast checkpoints.
 - `inspect_*.txt`, `export_*.log`, `quantize_*.log` — inspect / compare / quantize logs.
 - FP32 ONNX files are NOT included (deleted after AutoCast to fit the 32 GB disk).

@@ -201,7 +201,7 @@ python3 -m venv /tmp/gemx-venv
 `docs/dll-spec-2026-11-18.md`（DLL 仕様 v2、こちらが優先）。
 
 - エクスポート境界は `PoseModel.encode()`。SOMA FK・カメラ復号・kp2d ソルブ・右手ミラーは ONNX の外。
-- Hand は `ray_feats` を CPU 計算で入力にし、kp2d ヘッドは v1 では除外する。
+- Hand は `ray_feats` を CPU 計算で入力にし、kp2d ヘッドの `kp2d_mu` と `kp2d_presence` を出力する。カメラ並進のソルブは ONNX の外で実装する。以前配布された ONNX にはこれらの出力がないため再生成が必要。
 - 切り出しは 256x256（過去資料の 512 は誤り）。
 - この VM では torch が無いためエクスポート自体は未実行。
   `--self-test`（RayPE の numpy 参照実装の検証、重み・torch 不要）は通る。
