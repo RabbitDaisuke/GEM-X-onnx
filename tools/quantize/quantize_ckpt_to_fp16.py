@@ -319,14 +319,26 @@ def convert_torch_checkpoint(input_path, output_path, *, output_format,
         raise SystemExit(2)
 
     print(f"Loading {input_path} (weights_only=True) ...", flush=True)
+    # GEM-X checkpoints embed an omegaconf DictConfig, which
+    # weights_only=True rejects by default. Allowlist it (the file comes
+    # from nvidia/GEM-X / nvidia/EgoHand-v1, downloaded by the caller).
+    # mmap=True keeps a 10.66 GB checkpoint from being copied into RAM:
+    # without it the fallback load OOM-kills a 16 GB Actions runner.
     try:
-        obj = torch.load(input_path, map_location="cpu", weights_only=True)
+        from omegaconf import DictConfig, ListConfig
+        torch.serialization.add_safe_globals([DictConfig, ListConfig])
+    except Exception:
+        pass
+    try:
+        obj = torch.load(input_path, map_location="cpu", weights_only=True,
+                         mmap=True)
     except Exception as exc:
         print(f"weights_only load failed ({exc}). Retrying with "
               "weights_only=False — only do this for files you downloaded "
               "yourself from nvidia/GEM-X or nvidia/EgoHand-v1.",
               file=sys.stderr)
-        obj = torch.load(input_path, map_location="cpu", weights_only=False)
+        obj = torch.load(input_path, map_location="cpu", weights_only=False,
+                         mmap=True)
 
     weights, skipped, notes = _unwrap_checkpoint(
         obj, keep_optimizer_state=keep_optimizer_state)

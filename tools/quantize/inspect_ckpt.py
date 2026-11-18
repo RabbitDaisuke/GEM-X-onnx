@@ -99,13 +99,25 @@ def inspect_torch_checkpoint(path: str):
               "  pip install torch --index-url "
               "https://download.pytorch.org/whl/cpu", file=sys.stderr)
         raise SystemExit(2)
+    # GEM-X checkpoints embed an omegaconf DictConfig, which
+    # weights_only=True rejects by default. Allowlist it (the file comes
+    # from nvidia/GEM-X / nvidia/EgoHand-v1, downloaded by the caller).
+    # mmap=True keeps a 10.66 GB checkpoint from being copied into RAM:
+    # without it the fallback load OOM-kills a 16 GB Actions runner.
     try:
-        obj = torch.load(path, map_location="cpu", weights_only=True)
+        from omegaconf import DictConfig, ListConfig
+        torch.serialization.add_safe_globals([DictConfig, ListConfig])
+    except Exception:
+        pass
+    try:
+        obj = torch.load(path, map_location="cpu", weights_only=True,
+                         mmap=True)
     except Exception as exc:
         print(f"weights_only load failed ({exc}). Retrying with "
               "weights_only=False — only for files you downloaded yourself.",
               file=sys.stderr)
-        obj = torch.load(path, map_location="cpu", weights_only=False)
+        obj = torch.load(path, map_location="cpu", weights_only=False,
+                         mmap=True)
 
     if not isinstance(obj, dict):
         print(f"Top level is {type(obj).__name__}, not a dict.", file=sys.stderr)
