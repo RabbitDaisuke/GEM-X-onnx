@@ -266,7 +266,6 @@ def build_wrapper(task, model):
 
 def export_onnx(task, model, output_path, *, compare=False):
     import torch
-    from torch.onnx import dynamo_export
 
     wrapper = build_wrapper(task, model)
     wrapper.eval()
@@ -281,15 +280,33 @@ def export_onnx(task, model, output_path, *, compare=False):
             import numpy as np
             ray = compute_ray_feats_numpy(bbx.numpy(), K.numpy())
             args = args + (torch.from_numpy(ray),)
-            torch_out = wrapper(*args)
-        else:
-            torch_out = wrapper(*args)
+        torch_out = wrapper(*args)
         names = BODY_OUTPUTS if task == "body" else HAND_OUTPUTS
         print("PyTorch outputs:")
         for name, tensor in zip(names, torch_out):
             print(f"  {name}: {tuple(tensor.shape)} {tensor.dtype}")
-        exported = dynamo_export(wrapper, *args)
-        exported.save(output_path)
+        input_names = ["img", "bbx_xys", "K_fullimg"]
+        if task == "hand":
+            input_names.append("ray_feats")
+        # torch >= 2.10 removed torch.onnx.dynamo_export (this script
+        # used it and broke on torch 2.15: "cannot import name
+        # 'dynamo_export'"). The supported API is
+        # torch.onnx.export(..., dynamo=True). If a future torch drops
+        # the dynamo keyword (dynamo becomes the only backend), retry
+        # without it. Only retry when the TypeError names dynamo.
+        try:
+            torch.onnx.export(wrapper, args, output_path,
+                              input_names=input_names,
+                              output_names=list(names),
+                              dynamo=True)
+        except TypeError as exc:
+            if "dynamo" not in str(exc):
+                raise
+            print(f"NOTE: dynamo kwarg rejected ({exc}); "
+                  "retrying without it")
+            torch.onnx.export(wrapper, args, output_path,
+                              input_names=input_names,
+                              output_names=list(names))
         print(f"Saved ONNX (dynamo): {output_path}")
         if compare:
             compare_onnx(task, wrapper, args, output_path, names)
@@ -417,8 +434,9 @@ def main(argv=None):
         export_onnx(args.task, model, args.output, compare=args.compare)
     except Exception as exc:  # noqa: BLE001
         print(f"FAILED to export ONNX: {exc}")
-        print("Save the full traceback above. Likely causes: dynamo graph "
-              "break in the HF DINOv3 backbone (B1) or an unsupported op. "
+        print("Save the full traceback above. Likely causes: torch/ONNX "
+              "exporter API mismatch, dynamo graph break in the HF "
+              "DINOv3 backbone (B1), or an unsupported op. "
               "Report the failing op name; do not claim the export works.")
         raise
     if args.fp16_output:
