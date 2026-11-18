@@ -340,6 +340,57 @@ def compare_onnx(task, wrapper, args, onnx_path, names):
     print(f"  worst: {worst:.3e}  (FP32 export should be ~1e-5 or below)")
 
 
+def compare_fp16_onnx(task, fp32_path, fp16_path, names):
+    """Numeric check of the FP16 ONNX vs the FP32 ONNX, same inputs.
+
+    This is what makes the --data_max inf fallback honest instead of
+    error-swallowing: without the reference run, the IORangeRule is
+    gone, so a node whose runtime output exceeds the FP16 range is no
+    longer kept in FP32 — a bad cast can produce inf/NaN or grossly
+    wrong outputs and still exit 0. Run both ONNX files in ORT on the
+    same inputs and fail loudly if any FP16 output is non-finite or
+    the worst abs error exceeds 1e-1. Autocast converts graph inputs
+    to float16, so the FP16 session is fed float16 inputs.
+    """
+    import numpy as np
+    import onnxruntime as ort
+
+    img = np.random.randn(1, 3, 256, 256).astype(np.float32)
+    bbx = np.array([[128.0, 128.0, 200.0]], dtype=np.float32)
+    K = np.array([[[256.0, 0.0, 128.0],
+                   [0.0, 256.0, 128.0],
+                   [0.0, 0.0, 1.0]]], dtype=np.float32)
+    arrays32 = {"img": img, "bbx_xys": bbx, "K_fullimg": K}
+    if task == "hand":
+        arrays32["ray_feats"] = compute_ray_feats_numpy(bbx, K)
+    arrays16 = {k: v.astype(np.float16) for k, v in arrays32.items()}
+    sess32 = ort.InferenceSession(fp32_path, providers=["CPUExecutionProvider"])
+    sess16 = ort.InferenceSession(fp16_path, providers=["CPUExecutionProvider"])
+    out32 = sess32.run(None, {i.name: arrays32[i.name]
+                              for i in sess32.get_inputs()})
+    out16 = sess16.run(None, {i.name: arrays16[i.name]
+                              for i in sess16.get_inputs()})
+    print("FP16 ONNX vs FP32 ONNX (max abs error per output):")
+    worst = 0.0
+    for name, a, b in zip(names, out32, out16):
+        b32 = b.astype(np.float32)
+        if not np.all(np.isfinite(b32)):
+            raise SystemExit(
+                f"FP16 CHECK FAILED: {name} has non-finite values "
+                "(overflow — the --data_max inf fallback cast a node "
+                "that should have stayed in FP32). The FP16 file is "
+                "NOT safe to use.")
+        err = float(np.max(np.abs(a - b32))) if a.size else 0.0
+        worst = max(worst, err)
+        print(f"  {name}: {err:.3e}")
+    print(f"  worst: {worst:.3e}  (FP16 check fails above 1e-1)")
+    if worst > 0.1:
+        raise SystemExit(
+            f"FP16 CHECK FAILED: worst abs error {worst:.3e} > 1e-1 — "
+            "the FP16 cast is not numerically safe. The FP16 file is "
+            "NOT safe to use.")
+
+
 def autocast_fp16(fp32_path, fp16_path):
     """ModelOpt AutoCast: FP32 ONNX -> FP16 ONNX, CPU, no calibration data.
 
@@ -353,10 +404,16 @@ def autocast_fp16(fp32_path, fp16_path):
     reference run entirely (nodeclassifier.run(None) handles None —
     the IORangeRule is skipped, the InitializerRangeRule still
     applies), so classification is by op type + initializer range
-    only. The fallback is logged loudly; it is a documented trade-off,
-    not a silent downgrade: nodes whose runtime outputs would exceed
-    the FP16 range are no longer detected. The FP16 result still needs
-    the TensorRT build + numeric check on the GPU machine.
+    only. That retry is a WORKAROUND, not a fix: it sidesteps the
+    failing step instead of diagnosing it, and the lost IORangeRule
+    means a bad cast can silently produce inf/NaN. It is only
+    trustworthy because main() runs compare_fp16_onnx() after a
+    successful autocast (with --compare) and fails loudly if the FP16
+    output is not numerically safe. Known limit of that check: it
+    only sees outputs — intermediate overflow that CPU ORT happens
+    to compute in FP32 and that never reaches an output is invisible
+    to it. The real cause of the reference run failure is still
+    unknown until the autocast log is read.
     """
     cmd = [sys.executable, "-m", "modelopt.onnx.autocast",
            "--onnx_path", fp32_path, "--output_path", fp16_path]
@@ -474,6 +531,18 @@ def main(argv=None):
     if args.fp16_output:
         if not autocast_fp16(args.output, args.fp16_output):
             return 2
+        names = BODY_OUTPUTS if args.task == "body" else HAND_OUTPUTS
+        if args.compare:
+            try:
+                compare_fp16_onnx(args.task, args.output,
+                                  args.fp16_output, names)
+            except SystemExit as exc:
+                print(exc)
+                return 2
+        else:
+            print("WARNING: FP16 output NOT numerically verified — "
+                  "run with --compare to check it (a --data_max inf "
+                  "fallback cast can silently overflow).")
     print("Done. Next: tensorrt_rtx --onnx=<fp16 onnx> "
           "--saveEngine=<name>.trt --memPoolSize=tacticSharedMem:48K")
     return 0
