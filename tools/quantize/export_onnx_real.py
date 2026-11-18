@@ -351,7 +351,7 @@ def autocast_fp16(fp32_path, fp16_path):
         print(proc.stderr)
         print("MISSING/FAILED: nvidia-modelopt AutoCast. "
               "Install: pip install onnx-graphsurgeon ml_dtypes "
-              "onnxslim lief")
+              "onnxslim lief polygraphy")
         return False
     print(f"Saved FP16 ONNX: {fp16_path}")
     return True

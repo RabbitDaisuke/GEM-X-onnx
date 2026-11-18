@@ -101,17 +101,25 @@ DEPS = [
     # the 35 reachable modules — no more guessing one failure at a time).
     # Top-level imports the AutoCast path executes, beyond what torch /
     # onnx already bring: onnx-graphsurgeon, ml_dtypes, onnxslim,
-    # lief. Deliberately NOT nvidia-modelopt[onnx]: its PyPI metadata
+    # lief, polygraphy. CORRECTION (2026-11-18, 6th failure): the
+    # ReferenceRunner DOES run on the default invocation — convert.py
+    # line 49 sets DEFAULT_DATA_MAX = 512 (finite), so the branch
+    # `(data_max is not None and data_max != np.inf)` is always true
+    # and referencerunner.py run() imports polygraphy at lines 285-288
+    # (constants, ModifyOutputs, Comparator) and _get_ort_runner at
+    # 190-191 (BytesFromOnnx, OnnxrtRunner, SessionFromOnnx). The
+    # earlier claim that our invocation "never reaches it" was wrong
+    # because the DEFAULT_DATA_MAX constant was never read.
+    # Deliberately NOT nvidia-modelopt[onnx]: its PyPI metadata
     # pulls cupy-cuda13x and onnxruntime-gpu on Linux x86_64 Python
     # >3.10, which would downgrade onnxruntime 1.32.0 -> <=1.30 and
     # onnx 1.23.2 -> 1.21.x and waste gigabytes of CUDA libs on a CPU
     # Codespace. NOT needed, per the closure: cupy is try/except-
-    # guarded in int4.py; polygraphy is only imported lazily inside
-    # ReferenceRunner methods, which our --onnx_path/--output_path
-    # invocation never reaches; transformers only inside
+    # guarded in int4.py; transformers only inside
     # ort_utils.create_input_shapes_profile (calibration flow, not
     # AutoCast); onnxconverter-common appears nowhere in the closure.
     "onnx-graphsurgeon>=0.6.1", "ml_dtypes", "onnxslim>=0.1.78", "lief",
+    "polygraphy>=0.53.4",
     "nvidia-modelopt", "huggingface_hub", "safetensors",
 ]
 
@@ -295,7 +303,7 @@ def venv_missing_modules(venv_py):
     check = ("import importlib.util as u;"
              "mods=['torch','transformers','einops','onnx','onnxruntime',"
              "'onnxscript','onnx_graphsurgeon','onnxslim','lief',"
-             "'ml_dtypes','modelopt',"
+             "'polygraphy','ml_dtypes','modelopt',"
              "'huggingface_hub','safetensors',"
              "'omegaconf','numpy','scipy','PIL','cv2','soma'];"
              "print(','.join(m for m in mods if u.find_spec(m) is None))")
