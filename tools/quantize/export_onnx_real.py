@@ -350,7 +350,7 @@ def autocast_fp16(fp32_path, fp16_path):
     if proc.returncode != 0:
         print(proc.stderr)
         print("MISSING/FAILED: nvidia-modelopt AutoCast. "
-              "Install: pip install nvidia-modelopt[onnx]")
+              "Install: pip install onnx-graphsurgeon ml_dtypes")
         return False
     print(f"Saved FP16 ONNX: {fp16_path}")
     return True

@@ -96,6 +96,18 @@ DEPS = [
     # (torch/onnx/_internal/exporter/_core.py: `import onnxscript`)
     # and torch does NOT install it. PyPI latest 0.7.2 (2026-11-18).
     "onnxscript>=0.7,<0.8",
+    # ModelOpt AutoCast (modelopt.onnx.autocast, nvidia-modelopt 0.48.0
+    # wheel audited 2026-11-18) needs onnx-graphsurgeon (top-level
+    # import in modelopt/onnx/utils.py, precisionconverter.py,
+    # graphsanitizer.py) and ml_dtypes (top-level in
+    # precisionconverter.py). Deliberately NOT nvidia-modelopt[onnx]:
+    # its PyPI metadata pulls cupy-cuda13x and onnxruntime-gpu on
+    # Linux x86_64 Python >3.10, which would downgrade onnxruntime
+    # 1.32.0 -> <=1.30 and waste gigabytes of CUDA libs on a CPU
+    # Codespace. polygraphy is only imported lazily inside
+    # ReferenceRunner methods, which our --onnx_path/--output_path
+    # invocation never reaches, so it is not needed.
+    "onnx-graphsurgeon>=0.6.1", "ml_dtypes",
     "nvidia-modelopt", "huggingface_hub", "safetensors",
 ]
 
@@ -275,7 +287,8 @@ def venv_missing_modules(venv_py):
     """
     check = ("import importlib.util as u;"
              "mods=['torch','transformers','einops','onnx','onnxruntime',"
-             "'onnxscript','modelopt','huggingface_hub','safetensors',"
+             "'onnxscript','onnx_graphsurgeon','ml_dtypes','modelopt',"
+             "'huggingface_hub','safetensors',"
              "'omegaconf','numpy','scipy','PIL','cv2','soma'];"
              "print(','.join(m for m in mods if u.find_spec(m) is None))")
     proc = subprocess.run([venv_py, "-c", check],
