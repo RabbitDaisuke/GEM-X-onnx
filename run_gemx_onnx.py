@@ -429,10 +429,15 @@ def run_task(task, spec, root, tools_dir, args, weights_dir):
     # 32 GB disk headroom: the FP16 ONNX is what the TRT build uses.
     if not args.keep_fp32_onnx:
         fp32 = os.path.join(out_dir, f"{task}_fp32.onnx")
-        if os.path.exists(fp32):
-            log(f"removing {fp32} (use --keep-fp32-onnx to keep it)")
-            os.remove(fp32)
-            log_disk()
+        # The dynamo exporter uses ONNX external tensor data for its
+        # >2 GiB FP32 weights. The sidecar is disposable *only* together
+        # with the generated FP32 graph; otherwise it leaks several GiB.
+        for fp32_file in (fp32, fp32 + ".data"):
+            if os.path.exists(fp32_file):
+                log(f"removing generated {fp32_file} "
+                    "(use --keep-fp32-onnx to keep it)")
+                os.remove(fp32_file)
+        log_disk()
 
     if not args.skip_quantize:
         log(f"== {task}: FP16-cast checkpoint ==")
