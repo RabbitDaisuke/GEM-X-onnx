@@ -81,6 +81,7 @@ def inspect_fp8(path):
                    if node.op_type in ("QuantizeLinear", "DequantizeLinear")
                    and len(node.input) > 1}
     nonfinite = []
+    nonpositive = []
     checked = 0
     for name in sorted(scale_names):
         tensor = initializers.get(name)
@@ -98,16 +99,22 @@ def inspect_fp8(path):
             values = np.frombuffer(raw, dtype=dtype)
         else:
             values = numpy_helper.to_array(tensor)
+        if values.size != int(np.prod(tensor.dims)):
+            raise RuntimeError(f"Q/DQ scale size is inconsistent: {name}")
         checked += values.size
         if not np.isfinite(values).all():
             nonfinite.append(name)
+        elif not np.all(values > 0):
+            nonpositive.append(name)
     info = {"quantize_nodes": q, "dequantize_nodes": dq,
             "fp8_initializers": f8, "scale_count": len(scale_names),
             "scale_values_checked": checked, "nonfinite_scale_count": len(nonfinite),
             "nonfinite_scale_examples": nonfinite[:12],
+            "nonpositive_scale_count": len(nonpositive),
+            "nonpositive_scale_examples": nonpositive[:12],
             "opset": max(x.version for x in model.opset_import
                          if x.domain in ("", "ai.onnx"))}
-    if not q or not dq or not f8 or nonfinite:
+    if not q or not dq or not f8 or nonfinite or nonpositive:
         raise RuntimeError(
             f"FP8 export is invalid or unsafe: {json.dumps(info)}. "
             "Do NOT deploy as FP8.")
