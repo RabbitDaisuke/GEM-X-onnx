@@ -31,20 +31,23 @@ BODY_VIDEOS = (
 )
 HAND_VIDEO = "hand_pose.mp4"
 HAND_BOXES = (
-    ("left", (290.0, 385.0, 355.0)),
-    ("right", (560.0, 380.0, 365.0)),
+    ("left", (515.0, 525.0, 355.0)),
+    ("right", (735.0, 520.0, 355.0)),
 )
+HAND_FRAME_INTERVAL = (130, 200)  # full-camera hand sequence (not montage/mesh)
 
 
-def frames_from_video(path, count):
+def frames_from_video(path, count, frame_interval=None):
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
         raise RuntimeError(f"failed to read upstream demo clip: {path}")
     try:
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if total < count:
-            raise RuntimeError(f"{path}: only {total} frames for {count} requested")
-        for pos in np.linspace(0, total - 1, count, dtype=int):
+        start, stop = frame_interval if frame_interval else (0, total - 1)
+        if start < 0 or stop >= total or stop - start + 1 < count:
+            raise RuntimeError(f"{path}: invalid calibration frame interval "
+                               f"{start}..{stop} for {count} requested")
+        for pos in np.linspace(start, stop, count, dtype=int):
             cap.set(cv2.CAP_PROP_POS_FRAMES, int(pos))
             ok, frame = cap.read()
             if not ok:
@@ -102,7 +105,8 @@ def main(argv=None):
         for frame in frames_from_video(assets / name, args.samples // 2):
             accumulate(body, frame, bbox)
     hand = {"img": [], "bbx_xys": [], "K_fullimg": [], "ray_feats": []}
-    for frame in frames_from_video(assets / HAND_VIDEO, args.samples // 2):
+    for frame in frames_from_video(assets / HAND_VIDEO, args.samples // 2,
+                                   frame_interval=HAND_FRAME_INTERVAL):
         for side, bbox in HAND_BOXES:
             accumulate(hand, frame, bbox, side=side)
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -113,6 +117,7 @@ def main(argv=None):
         "source_commit": "4aef1452e5df171deff4f293c08e643eb450981e",
         "samples_per_model": args.samples,
         "manual_crops": {"body": BODY_VIDEOS, "hand": HAND_BOXES},
+        "hand_frame_interval": HAND_FRAME_INTERVAL,
         "disclosure": "Visualized pose overlays; coarse fixed crops. "
                       "Preliminary FP8 PTQ only. Replace with true GPU "
                       "inference inputs for production accuracy checks.",
