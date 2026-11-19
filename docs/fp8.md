@@ -24,10 +24,12 @@ free -h
 ~~~
 Run the calibrated FP8 path (CPU-only Codespace; very slow calibration may occur):
 ~~~bash
-.venv/bin/python -m pip install 'nvidia-modelopt[onnx]'
-.venv/bin/python tools/quantize/fp8_quantize_onnx.py --task body --onnx out/body_fp16.onnx --calibration out/calibration/body_calibration.npz --output out/body_fp8.onnx --calibration-ep cpu --calibrate-per-node
-.venv/bin/python tools/quantize/fp8_quantize_onnx.py --task hand --onnx out/hand_fp16.onnx --calibration out/calibration/hand_calibration.npz --output out/hand_fp8.onnx --calibration-ep cpu --calibrate-per-node
+.venv/bin/python -c 'from modelopt.onnx.quantization import quantize; print("ModelOpt ready")'
+.venv/bin/python tools/quantize/fp8_quantize_onnx.py --task body --onnx out/body_fp16.onnx --calibration out/calibration/body_calibration.npz --output out/body_fp8.onnx --calibration-ep cpu
+.venv/bin/python tools/quantize/fp8_quantize_onnx.py --task hand --onnx out/hand_fp16.onnx --calibration out/calibration/hand_calibration.npz --output out/hand_fp8.onnx --calibration-ep cpu
 ~~~
+The exporter venv already installs ModelOpt/ONNX dependencies; do not install GPU-only extras in a CPU Codespace. First run ordinary full-graph calibration. If RAM plus swap is still insufficient, retry with `--calibrate-per-node` (substantially slower). For a preliminary smoke test only, `prepare_demo_calibration.py` can obtain 32 samples each from NVlabs demo videos (including visual overlays), with limitations written to `demo_manifest.json`. For accuracy evaluation, replace these with actual GPU inference feeds.
+
 If using standalone generation instead, replace the calibration paths with `body.npz` and `hand.npz`. ModelOpt may require a GPU Execution Provider for FP16 nodes unsupported by ORT CPU; that is an actual calibration failure, not permission to fabricate calibration values. On an NVIDIA GPU host use `--calibration-ep cuda:0`.
 Output `body_fp8.onnx` and `hand_fp8.onnx` have Q/DQ and must pass the FP8 type check. Original FP16 ONNX files are kept unchanged.
 ## Deploy on RTX GPUs
