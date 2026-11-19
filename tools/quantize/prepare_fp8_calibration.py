@@ -138,10 +138,9 @@ def main(argv=None):
                     bbox = entry.get("crop_xys")
                     if not bbox or len(bbox) != 3:
                         continue
-                    if entry.get("pose") is None and task == "body":
-                        # The JSON contains the crop even for failed frames.
-                        # Calibrate only on successfully processed persons.
-                        continue
+                    # The exported inference JSON deliberately omits the
+                    # large per-person pose arrays. Its "persons" entries
+                    # still contain valid crop_xys for calibration.
                     mirror = task == "hand" and entry.get("side") == "right"
                     img = crop_normalized(frame, bbox, mirror)
                     bbx = np.asarray(bbox, np.float32)
