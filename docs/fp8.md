@@ -33,14 +33,17 @@ The exporter venv already installs ModelOpt/ONNX dependencies; do not install GP
 If using standalone generation instead, replace the calibration paths with `body.npz` and `hand.npz`. ModelOpt may require a GPU Execution Provider for FP16 nodes unsupported by ORT CPU; that is an actual calibration failure, not permission to fabricate calibration values. On an NVIDIA GPU host use `--calibration-ep cuda:0`.
 Output `body_fp8.onnx` and `hand_fp8.onnx` have Q/DQ and must pass the FP8 type check. Original FP16 ONNX files are kept unchanged.
 ## Deploy on RTX GPUs
-RTX 40/50 (Ada/Blackwell) are FP8-capable. RTX 30 (Ampere) uses FP16. Person/hand detectors remain FP16 in both configurations. The runtime must detect the GPU's compute capability and select Body+Hand FP8 only for SM >= 8.9.
-~~~powershell
-tensorrt_rtx.exe --onnx=body_fp8.onnx --saveEngine=body_fp8.trt --memPoolSize=tacticSharedMem:48K
-tensorrt_rtx.exe --onnx=hand_fp8.onnx --saveEngine=hand_fp8.trt --memPoolSize=tacticSharedMem:48K
-~~~
-The build must be run on the target RTX GPU. The 48KiB tactic shared-memory constraint is mandatory for RTX 40 in SCG mode. TensorRT for RTX is strongly typed; an FP16 ONNX does **not** become FP8 simply by requesting faster kernels.
+**Important runtime distinction:** the Windows `gemx-python` package uses **RT-DETR R18 COCO** for person detection, not YOLOX-X HumanArt (which is used by NVlabs's upstream path). The FP8 Windows runtime must select all four actual models, not only Body and Hand:
+| Model | RTX 40/50 FP8 ONNX + external weights | RTX 30 compatibility |
+| --- | --- | --- |
+| GEM-X Body | `body_fp8.onnx` + `body_fp8.onnx_data` | `body_fp16.onnx` |
+| GEM-X Hand | `hand_fp8.onnx` + `hand_fp8.onnx_data` | `hand_fp16.onnx` |
+| RT-DETR R18 person | `rtdetr_r18vd_coco_fp8.onnx` + `rtdetr_r18vd_coco_fp8.onnx_data` | `rtdetr_r18vd_coco_fp16.onnx` |
+| RT-DETR hand | `hand_detector_fp8.onnx` + `hand_detector_fp8.onnx_data` | `hand_detector_fp16.onnx` |
+Place each pair into the Windows runtime's `models/` directory. Its `--pose-precision auto` selects FP8 for SM >= 8.9 and FP16 on RTX 30 for **all four**; missing FP8 files are reported rather than silently replaced with FP16. The Windows runtime builds TensorRT-RTX engines when first launched. It uses a 48KiB tactic shared-memory limit for SCG/CiG and requests native CUDA Graphs. The separate `yolox_humanart_fp8.onnx` is **not** a replacement for the RT-DETR R18 in this Windows runtime.
+The corrected GEM-X Body/Hand results were first written as `*_fp8_repaired.onnx`. Use `tools/quantize/finalize_fp8_onnx.py` to publish canonical `*_fp8.onnx` with updated external-data references. **Do not hard-link external ONNX weight files:** `onnx.checker` rejects multiple hard links for security. The finalizer uses an OS copy (reflink where supported) while retaining original models.
 ## Status
-GitHub-side FP8 converter and video/JSON calibration generator are implemented. Real GEM-X FP8 output, numeric accuracy, engine build, and real SCG latency require target-machine execution. A successful Q/DQ export alone is not proof of FP8 Tensor Core utilization or numeric equivalence.
+Codespace has produced and checked all four canonical Windows-runtime FP8 ONNX files and their matching external weight sidecars. The full ONNX model checker and every scale's finiteness/positive-value checks were performed; the GEM-X Body and Hand originally each had 38 infinite scales before the float32-intermediate fix. **Actual TensorRT-RTX engine builds, accuracy compared to FP16, and real SCG latency remain unverified**, because this Codespace has no RTX GPU. The demonstration-video calibration has 32 samples per model (and overlays); production accuracy requires calibration from the user's actual video/model feeds.
 
 
 ## FP8 scale overflow correction and rejection of nonfinite scales
@@ -70,3 +73,5 @@ A 32-sample preliminary calibration feed can be constructed using official demon
 .venv/bin/python tools/quantize/quantize_detector_fp8.py --onnx weights/yolox_humanart.onnx --calibration out/calibration/yolox_humanart.npz --output out/yolox_humanart_fp8.onnx
 ```
 Here `weights/hand_detector.onnx` and `weights/yolox_humanart.onnx` represent the actual user-provided or officially downloaded originals; they are not included in this repository. **YOLOX HumanArt commercial licensing must be independently verified before deployment or redistribution.** The exporter performs ONNX structural and finite-scale checks. TensorRT-RTX GPU compatibility, inference accuracy and speed still need an RTX machine.
+
+**RT-DETR R18 person detection:** the Windows runtime's actual person detector is `rtdetr_r18vd_coco_fp16.onnx` from `onnx-community/rtdetr_r18vd_coco_o365` (revision `37122d8b9b89eb8384fba4d688d05051eaf7bb78`, SHA-256 `540c30402fb56fdbc1b2c6256b981d53b47d103b256474cf617bf6e9b3e321f8`). The matching FP8 is generated from the existing FP16 source using the `pixel_values` input (RGB float32 /255, 640x640 centered gray-114 letterbox). Preliminary real-video samples can be prepared using `tools/quantize/prepare_rtdetr_person_calibration.py`. Do not replace that model with YOLOX to claim the Windows detection path is quantized.
