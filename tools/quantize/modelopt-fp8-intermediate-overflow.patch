@@ -1,6 +1,6 @@
 --- a/modelopt/onnx/quantization/fp8.py
 +++ b/modelopt/onnx/quantization/fp8.py
-@@ -75,5 +75,7 @@
+@@ -75,5 +75,8 @@
      def _int8_scale_to_fp8_scale(scale: np.ndarray, scale_name: str):
          np_scale = onnx.numpy_helper.to_array(scale)
 -        np_fp8_scale = (np_scale * 448.0) / 127.0
