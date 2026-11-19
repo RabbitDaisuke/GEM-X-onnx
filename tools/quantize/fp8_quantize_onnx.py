@@ -60,21 +60,57 @@ def read_calibration(path, task):
 
 
 def inspect_fp8(path):
-    """Validate that the output has actual FLOAT8 Q/DQ, not only FP16."""
-    import onnx
+    """Verify Q/DQ, FP8 tensor types and every Q/DQ scale's finiteness.
 
+    Inspect small scale tensors through offsets in ONNX external data files.
+    Do not load multi-GB GEM-X model weights into RAM just to check scales.
+    """
+    import onnx
+    from onnx import numpy_helper
+
+    path = Path(path)
     model = onnx.load(str(path), load_external_data=False)
-    q = sum(node.op_type == "QuantizeLinear" for node in model.graph.node)
-    dq = sum(node.op_type == "DequantizeLinear" for node in model.graph.node)
+    nodes = list(model.graph.node)
+    q = sum(node.op_type == "QuantizeLinear" for node in nodes)
+    dq = sum(node.op_type == "DequantizeLinear" for node in nodes)
     f8_types = {onnx.TensorProto.FLOAT8E4M3FN, onnx.TensorProto.FLOAT8E5M2}
     f8 = sum(t.data_type in f8_types for t in model.graph.initializer)
-    if q == 0 or dq == 0 or f8 == 0:
+    initializers = {t.name: t for t in model.graph.initializer}
+    scale_names = {node.input[1] for node in nodes
+                   if node.op_type in ("QuantizeLinear", "DequantizeLinear")
+                   and len(node.input) > 1}
+    nonfinite = []
+    checked = 0
+    for name in sorted(scale_names):
+        tensor = initializers.get(name)
+        if tensor is None:
+            raise RuntimeError(f"Q/DQ scale is not a constant initializer: {name}")
+        if tensor.external_data:
+            external = {entry.key: entry.value for entry in tensor.external_data}
+            location = external.get("location")
+            if not location or Path(location).is_absolute() or ".." in Path(location).parts:
+                raise RuntimeError(f"unsafe or missing ONNX external scale location: {name}")
+            with (path.parent / location).open("rb") as handle:
+                handle.seek(int(external.get("offset", "0")))
+                raw = handle.read(int(external["length"]))
+            dtype = onnx.helper.tensor_dtype_to_np_dtype(tensor.data_type)
+            values = np.frombuffer(raw, dtype=dtype)
+        else:
+            values = numpy_helper.to_array(tensor)
+        checked += values.size
+        if not np.isfinite(values).all():
+            nonfinite.append(name)
+    info = {"quantize_nodes": q, "dequantize_nodes": dq,
+            "fp8_initializers": f8, "scale_count": len(scale_names),
+            "scale_values_checked": checked, "nonfinite_scale_count": len(nonfinite),
+            "nonfinite_scale_examples": nonfinite[:12],
+            "opset": max(x.version for x in model.opset_import
+                         if x.domain in ("", "ai.onnx"))}
+    if not q or not dq or not f8 or nonfinite:
         raise RuntimeError(
-            f"FP8 export is not verified: Q={q}, DQ={dq}, FP8 initializers={f8}. "
+            f"FP8 export is invalid or unsafe: {json.dumps(info)}. "
             "Do NOT deploy as FP8.")
-    return {"quantize_nodes": q, "dequantize_nodes": dq,
-            "fp8_initializers": f8, "opset": max(x.version for x in model.opset_import
-                                                 if x.domain in ("", "ai.onnx"))}
+    return info
 
 
 def main(argv=None):
