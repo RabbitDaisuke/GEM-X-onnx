@@ -44,6 +44,11 @@ def validate_feeds(path, model):
             if raw.ndim != len(tensor.shape.dim):
                 raise ValueError(f"{input_info.name}: wrong rank {raw.shape}")
             for index, dim in enumerate(tensor.shape.dim):
+                # axis 0 holds multiple calibration samples, not the ONNX
+                # model's per-inference batch (normally 1); ModelOpt
+                # splits these into individual inference batches.
+                if index == 0:
+                    continue
                 if dim.HasField("dim_value") and raw.shape[index] != dim.dim_value:
                     raise ValueError(f"{input_info.name}: axis {index} must be "
                                      f"{dim.dim_value}, got {raw.shape[index]}")
