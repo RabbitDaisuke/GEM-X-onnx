@@ -9,7 +9,9 @@ body_fp8.onnx / hand_fp8.onnx with matching external weight filenames
 for the Windows TensorRT-RTX runtime.
 
 Only ONNX GRAPH METADATA (about 1 MiB) is written. The ~1.7 GiB external
-weights are hard-linked on the same filesystem, NOT copied or converted.
+weights are copied by the operating system (reflink when available), NOT
+converted or loaded by Python. Hardlinks are forbidden: ONNX's checker
+rejects external tensors with more than one hardlink.
 The original repaired graph, data and FP16 ONNX are all retained.
 
 Usage:
@@ -19,6 +21,7 @@ Usage:
 import argparse
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import onnx
@@ -39,10 +42,11 @@ def main(argv=None):
     dst_meta = Path(str(dst) + ".quantization.json")
     src_meta = Path(str(src) + ".quantization.json")
     staging = Path(str(dst) + ".metadata-part")
+    staging_data = Path(str(dst_data) + ".part")
     for required in (src, src_data, src_meta):
         if not required.is_file():
             parser.error(f"missing required repaired FP8 file: {required}")
-    for target in (dst, dst_data, dst_meta, staging):
+    for target in (dst, dst_data, dst_meta, staging, staging_data):
         if target.exists():
             parser.error(f"will not replace existing destination: {target}")
 
@@ -70,10 +74,12 @@ def main(argv=None):
     # A safe, small graph rewrite. No external weight tensors are loaded.
     onnx.save_model(graph, str(staging))
     try:
-        # os.link is zero-copy and makes the canonical pair portable when
-        # both files are copied together to Windows. If unsupported by the
-        # filesystem, fail instead of silently copying gigabytes.
-        os.link(src_data, dst_data)
+        # ONNX checker rejects shared hardlinks for external weights, so
+        # use OS-level copy/reflink. Do not stream large weights in Python.
+        # The repaired original and its weights are kept unchanged.
+        subprocess.run(["cp", "--reflink=auto", "--",
+                        str(src_data), str(staging_data)], check=True)
+        os.replace(staging_data, dst_data)
         os.replace(staging, dst)
         info = inspect_fp8(dst)
         info.update(task=args.task, source_onnx=old_info.get("source_onnx"),
