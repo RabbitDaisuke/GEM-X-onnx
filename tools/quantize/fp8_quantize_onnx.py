@@ -66,6 +66,7 @@ def inspect_fp8(path):
     Do not load multi-GB GEM-X model weights into RAM just to check scales.
     """
     import onnx
+    import numpy as np
     from onnx import numpy_helper
 
     path = Path(path)
