@@ -1,10 +1,9 @@
-# tools/quantize — GEM-X の FP16 化ツール (学習画像なし)
+# tools/quantize — GEM-X の FP16・FP8 ツール
 
-CPU だけで動く、重みの FP16 化と Hugging Face からのダウンロード用
-ツール集。**学習画像もキャリブレーションデータもいらない。**
-FP16 の重みキャストはテンソル単位の型変換で、データセットを
-読まないからだ。INT8 / FP8 だけは別で、スケールを決めるのに実データ
-が必要になる。v1 ではやらない。
+FP16 の重みキャストには学習画像・キャリブレーションデータは不要。
+FP8 ONNX は別経路であり、**実際のモデル入力を使ったキャリブレーションが必須**。
+RTX 40/50のBody・HandをFP8 Q/DQ化するツールも追加した。
+RTX 30の既存FP16は保持する。FP8手順は [docs/fp8.md](../../docs/fp8.md) を参照。
 
 ## daisuke の PC (2026-11-17 の Task Manager より)
 
@@ -27,6 +26,8 @@ FP16 の重みキャストはテンソル単位の型変換で、データセッ
 | `hf_download.py` | ログインなしで Hugging Face から落とす (stdlib のみ) |
 | `export_onnx_fp16.py` | **テンプレート (未検証)**。FP32 ONNX → ModelOpt AutoCast で FP16 ONNX |
 | `requirements.txt` | torch (CPU) / safetensors / huggingface_hub / numpy / onnx / onnxruntime |
+| `fp8_quantize_onnx.py` | 実入力NPZを使ったModelOpt FP8 Q/DQ ONNX生成（元FP16は保持） |
+| `prepare_fp8_calibration.py` | 動画と既存推論JSONからBody/Hand校正入力を再生成 |
 
 ## セットアップ (Windows PC、PowerShell)
 
