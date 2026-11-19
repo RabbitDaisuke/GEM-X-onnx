@@ -264,17 +264,17 @@ def build_wrapper(task, model):
     return ExportWrapper(model)
 
 
-def export_onnx(task, model, output_path, *, compare=False):
+def export_onnx(task, model, output_path, *, compare=False, batch_size=1):
     import torch
 
     wrapper = build_wrapper(task, model)
     wrapper.eval()
     with torch.inference_mode():
-        img = torch.randn(1, 3, 256, 256)
-        bbx = torch.tensor([[128.0, 128.0, 200.0]])
+        img = torch.randn(batch_size, 3, 256, 256)
+        bbx = torch.tensor([[128.0, 128.0, 200.0]]).repeat(batch_size, 1)
         K = torch.tensor([[[256.0, 0.0, 128.0],
                            [0.0, 256.0, 128.0],
-                           [0.0, 0.0, 1.0]]])
+                           [0.0, 0.0, 1.0]]]).repeat(batch_size, 1, 1)
         args = (img, bbx, K)
         if task == "hand":
             import numpy as np
@@ -482,6 +482,8 @@ def main(argv=None):
     parser.add_argument("--gemx-root", help="cloned NVlabs/GEM-X repo directory")
     parser.add_argument("--output", help="output FP32 ONNX path")
     parser.add_argument("--fp16-output", help="also run ModelOpt AutoCast to this FP16 ONNX path")
+    parser.add_argument("--batch-size", type=int, default=1,
+                        help="static ONNX export batch; use 2 for verified two-Hand inference")
     parser.add_argument("--compare", action="store_true",
                         help="compare ONNX vs PyTorch with onnxruntime")
     parser.add_argument("--self-test", action="store_true",
@@ -490,6 +492,10 @@ def main(argv=None):
 
     if args.self_test:
         return self_test()
+    if args.batch_size not in (1, 2):
+        parser.error("--batch-size must be 1 or 2")
+    if args.batch_size == 2 and args.task != "hand":
+        parser.error("batch-2 export is currently supported only for Hand")
 
     missing = []
     if not args.task:
@@ -520,7 +526,8 @@ def main(argv=None):
         print(f"FAILED to load {args.task} model: {exc}")
         return 2
     try:
-        export_onnx(args.task, model, args.output, compare=args.compare)
+        export_onnx(args.task, model, args.output,
+                    compare=args.compare, batch_size=args.batch_size)
     except Exception as exc:  # noqa: BLE001
         print(f"FAILED to export ONNX: {exc}")
         print("Save the full traceback above. Likely causes: torch/ONNX "
