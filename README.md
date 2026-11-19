@@ -78,6 +78,6 @@ python3 run_gemx_onnx.py --hf-push RabbitDaisuke/gemx-onnx-fp16 --hf-token $HF_T
 
 そのステップのログ全文が結果。`out/body_fp16.onnx` ができるまでは「エクスポート成功」とは言わない。ログを貼って相談すること。
 
-## FP8（RTX 40/50）
+## FP8量子化の実験結果（任意）
 
-FP16 ONNXを維持したまま実入力キャリブレーションによるFP8 Q/DQ ONNXを生成する追加経路を用意した。RTX 30はFP16を使用する。手順・制約は [docs/fp8.md](docs/fp8.md) を参照。
+既存FP16 ONNXを保持しつつModelOptによるFP8 Q/DQ ONNXを生成できる。FP8の利用・GPU世代による切替は必須ではなく、量子化の実用性と精度を評価する目的の実験経路。デモ映像校正で検出器の出力差を確認したため、FP8を標準実行として強制しない。結果・制限は [docs/fp8.md](docs/fp8.md) を参照。
