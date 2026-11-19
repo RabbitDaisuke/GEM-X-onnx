@@ -649,11 +649,17 @@ def main(argv=None):
     weights_dir = choose_weights_dir(root, args.weights_dir)
     if not args.no_cleanup and free_gb(root) < 15:
         cleanup_disk()
+    # An output staging directory may live on the larger /tmp volume.
+    # Do not require 12 GB on the 32 GB workspace when ONNX output and
+    # downloaded checkpoints are both stored on other volumes. Keep
+    # enough room for metadata/logs without deleting preinstalled tools.
     repo_free = free_gb(root)
+    output_free = free_gb(os.path.join(root, "out"))
     w_free = free_gb(weights_dir)
-    log(f"disk check: repo {repo_free:.1f} GB free (need ~12), "
+    log(f"disk check: repo {repo_free:.1f} GB free (need ~1), "
+        f"output disk {output_free:.1f} GB free (need ~12), "
         f"weights disk {w_free:.1f} GB free (need ~12)")
-    if repo_free < 12 or w_free < 12:
+    if repo_free < 1 or output_free < 12 or w_free < 12:
         print("ERROR: not enough free disk. Biggest dirs on /:",
               file=sys.stderr)
         subprocess.run("du -sh /* 2>/dev/null | sort -rh | head -n 10",
