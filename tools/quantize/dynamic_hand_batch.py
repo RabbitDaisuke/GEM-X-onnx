@@ -116,12 +116,17 @@ def build(single_path, double_path, output):
         if name.startswith("val_"):
             v_np = numpy_helper.to_array(v)
             w_np = numpy_helper.to_array(w)
+            # A shape vector contains exactly one N-dependent dimension.
+            # Its position need not be zero: [25,8,32] -> [25,16,32].
+            changed_indices = np.flatnonzero(v_np != w_np)
             if (v.data_type not in (onnx.TensorProto.INT32, onnx.TensorProto.INT64)
-                    or v_np.shape != w_np.shape
-                    or not np.array_equal(w_np.astype(np.int64),
-                                          v_np.astype(np.int64) * 2)):
-                raise ValueError(f"Unexpected changed shape scalar {name}")
-            scaled.append(name)
+                    or v_np.ndim != 1 or v_np.shape != w_np.shape
+                    or changed_indices.size != 1):
+                raise ValueError(f"Unexpected changed shape vector {name}")
+            index = int(changed_indices[0])
+            if int(w_np[index]) != 2 * int(v_np[index]):
+                raise ValueError(f"Batch dimension not linearly scaled in {name}")
+            scaled.append((name, index))
         elif name.startswith("expand"):
             v_np = numpy_helper.to_array(v)
             w_np = numpy_helper.to_array(w)
@@ -157,23 +162,55 @@ def build(single_path, double_path, output):
                          [prefix + "batch_scalar"], name=prefix + "squeeze"),
     ]
 
-    for name in sorted(scaled):
+    # Many transformer layers reuse the same few shape expressions.
+    # Build each unique expression once and replace all of its uses rather
+    # than inserting hundreds of duplicate shape operations.
+    shape_cache = {}
+    replacements = {}
+    for name, index in sorted(scaled):
         base = weights_a[name]
-        if base.data_type == onnx.TensorProto.INT64:
-            batch = prefix + "batch_scalar"
-        elif base.data_type == onnx.TensorProto.INT32:
-            batch = prefix + "batch_int32"
-            if not any(x.output and x.output[0] == batch for x in ops):
-                ops.append(helper.make_node("Cast", [prefix + "batch_scalar"], [batch],
-                                            to=onnx.TensorProto.INT32,
-                                            name=prefix + "cast_int32"))
-        else:
-            raise AssertionError(name)
-        init.append(numpy_helper.from_array(numpy_helper.to_array(base),
-                                             name=prefix + "base_" + name))
-        ops.append(helper.make_node(
-            "Mul", [batch, prefix + "base_" + name], [name],
-            name=prefix + "mul_" + name))
+        values = numpy_helper.to_array(base)
+        key = (base.data_type, index, tuple(int(x) for x in values))
+        if key not in shape_cache:
+            number = len(shape_cache)
+            stem = prefix + "shape_value_" + str(number)
+            shape_cache[key] = stem + "_out"
+            if base.data_type == onnx.TensorProto.INT64:
+                batch_vec = prefix + "batch_vec"
+            elif base.data_type == onnx.TensorProto.INT32:
+                batch_vec = prefix + "batch_vec_int32"
+                if not any(x.output and x.output[0] == batch_vec for x in ops):
+                    ops.append(helper.make_node(
+                        "Cast", [prefix + "batch_vec"], [batch_vec],
+                        to=onnx.TensorProto.INT32,
+                        name=prefix + "cast_batch_vec_int32"))
+            else:
+                raise AssertionError(name)
+            factor = int(values[index])
+            if factor == 1:
+                dynamic_one = batch_vec
+            else:
+                init.append(numpy_helper.from_array(
+                    np.asarray([factor], dtype=values.dtype),
+                    name=stem + "_factor"))
+                dynamic_one = stem + "_scaled"
+                ops.append(helper.make_node(
+                    "Mul", [batch_vec, stem + "_factor"], [dynamic_one],
+                    name=stem + "_mul"))
+            parts = []
+            if index:
+                init.append(numpy_helper.from_array(
+                    np.ascontiguousarray(values[:index]), name=stem + "_before"))
+                parts.append(stem + "_before")
+            parts.append(dynamic_one)
+            if index + 1 < len(values):
+                init.append(numpy_helper.from_array(
+                    np.ascontiguousarray(values[index + 1:]), name=stem + "_after"))
+                parts.append(stem + "_after")
+            ops.append(helper.make_node(
+                "Concat", parts, [shape_cache[key]], axis=0,
+                name=stem + "_concat"))
+        replacements[name] = shape_cache[key]
     for name in sorted(expanded):
         base = weights_a[name]
         dims = np.asarray(base.dims[1:], dtype=np.int64)
@@ -195,12 +232,16 @@ def build(single_path, double_path, output):
     # Existing intermediate value_info contains fixed single-batch sizes.
     # It is optional for runtime and must not conflict with the dynamic shapes.
     a.graph.ClearField("value_info")
-    keep = [x for x in a.graph.initializer
-            if x.name not in set(scaled) | set(expanded)]
+    removed_names = {name for name, _ in scaled} | set(expanded)
+    keep = [x for x in a.graph.initializer if x.name not in removed_names]
     a.graph.ClearField("initializer")
     a.graph.initializer.extend(keep)
     a.graph.initializer.extend(init)
     old_nodes = list(a.graph.node)
+    for node in old_nodes:
+        for index, input_name in enumerate(node.input):
+            if input_name in replacements:
+                node.input[index] = replacements[input_name]
     a.graph.ClearField("node")
     a.graph.node.extend(ops)
     a.graph.node.extend(old_nodes)
@@ -219,6 +260,7 @@ def build(single_path, double_path, output):
     report = {"source_single": str(single_path), "source_double": str(double_path),
               "dynamic_output": str(output), "unchanged_initializers": same,
               "dynamic_scaled_shapes": len(scaled),
+              "shared_scaled_shape_expressions": len(shape_cache),
               "dynamic_expanded_shapes": len(expanded),
               "status": "structurally checked; CPU inference not yet verified"}
     print(json.dumps(report, indent=2), flush=True)
