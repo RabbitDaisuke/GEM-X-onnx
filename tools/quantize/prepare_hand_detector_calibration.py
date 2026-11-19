@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """Create real RT-DETR Hand Detector calibration inputs from video frames.
 
-The RT-DETR preprocessing is copied from GEM-X/gem/common/detectors/hand.py:
-RGB, PIL bilinear resize 640x640, [0,1] float32, NCHW; original image
-dimensions [width,height] as int64. Upstream demo video frames contain
-visual overlays and are for preliminary FP8 conversion only.
+Calibrate against the ACTUAL Windows gemx-python/detectors.py GPU path:
+BGR->RGB, 640x640 aspect-preserving centered gray-114 letterbox,
+/255 float32 NCHW. The original target sizes input is [640,640] int64
+because the detector sees the already-letterboxed image, and Windows
+unletterboxes boxes after inference. The previous stretched image +
+original [width,height] calibration was for the upstream NVlabs path
+and was mismatched to this Windows inference route. These sample frames
+contain overlays and remain preliminary calibration only.
 """
 import argparse
 from pathlib import Path
 
 import cv2
 import numpy as np
-from PIL import Image
-
+ 
 
 def sample_video(path, count):
     cap = cv2.VideoCapture(str(path))
@@ -54,19 +57,27 @@ def main():
     for path, count in zip(args.videos, counts):
         for frame in sample_video(path, count):
             h, w = frame.shape[:2]
-            image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            resized = image.resize((640, 640), Image.Resampling.BILINEAR)
-            pixels = np.asarray(resized, dtype=np.float32) / 255.0
-            images.append(pixels.transpose(2, 0, 1))
-            orig.append([w, h])
+            scale = min(640.0 / h, 640.0 / w)
+            resized_w, resized_h = round(w * scale), round(h * scale)
+            resized = cv2.resize(
+                frame, (resized_w, resized_h),
+                interpolation=cv2.INTER_LINEAR)
+            left = (640 - resized_w) // 2
+            top = (640 - resized_h) // 2
+            padded = np.full((640, 640, 3), 114, dtype=np.uint8)
+            padded[top:top+resized_h, left:left+resized_w] = resized
+            rgb = padded[:, :, ::-1].astype(np.float32) / 255.0
+            images.append(np.ascontiguousarray(rgb.transpose(2, 0, 1)))
+            orig.append([640, 640])
     args.output.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         args.output, images=np.ascontiguousarray(np.stack(images), np.float32),
         orig_target_sizes=np.asarray(orig, dtype=np.int64))
     print(f"{args.output}: {len(images)} samples, images="
           f"{(len(images), 3, 640, 640)} float32; orig_target_sizes int64")
-    print("NOTE: official demo footage contains pose overlays. This is "
-          "conversion calibration, not production accuracy validation.")
+    print("NOTE: inputs match Windows centered letterbox + orig sizes "
+          "[640,640]. Demo footage has pose overlays and does NOT "
+          "establish production accuracy.")
 
 
 if __name__ == "__main__":
