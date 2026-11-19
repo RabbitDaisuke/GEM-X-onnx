@@ -128,6 +128,8 @@ def download_file(repo: str, remote_path: str, out_path: str,
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     downloaded = existing
     chunk = 1024 * 1024
+    last_reported_percent = -1
+    interactive = sys.stdout.isatty()
     with open(out_path, mode) as fh:
         while True:
             data = resp.read(chunk)
@@ -137,9 +139,14 @@ def download_file(repo: str, remote_path: str, out_path: str,
             downloaded += len(data)
             if total:
                 pct = 100.0 * downloaded / (total + (existing if mode == "ab" else 0))
-                print(f"\r  {downloaded / 1e9:.2f} GB ({pct:.1f}%)",
-                      end="", flush=True)
-    print()
+                whole_percent = int(pct)
+                if whole_percent > last_reported_percent:
+                    prefix = "\r" if interactive else ""
+                    print(f"{prefix}  {downloaded / 1e9:.2f} GB ({pct:.1f}%)",
+                          end="" if interactive else "\n", flush=True)
+                    last_reported_percent = whole_percent
+    if interactive:
+        print()
     if total is not None:
         expected = total + (existing if mode == "ab" and resp.status == 206 else 0)
         if downloaded != expected:
