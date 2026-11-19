@@ -77,3 +77,7 @@ python3 run_gemx_onnx.py --hf-push RabbitDaisuke/gemx-onnx-fp16 --hf-token $HF_T
 ## 失敗したとき
 
 そのステップのログ全文が結果。`out/body_fp16.onnx` ができるまでは「エクスポート成功」とは言わない。ログを貼って相談すること。
+
+## FP8（RTX 40/50）
+
+FP16 ONNXを維持したまま実入力キャリブレーションによるFP8 Q/DQ ONNXを生成する追加経路を用意した。RTX 30はFP16を使用する。手順・制約は [docs/fp8.md](docs/fp8.md) を参照。
