@@ -1,0 +1,13 @@
+# CPU Codespace export ONLY. Not a Windows L1/runtime dependency.
+# NVIDIA ModelOpt AutoCast 0.48.0 requires onnxscript at import time.
+numpy==2.5.5
+onnx==1.23.2
+onnxruntime==1.32.0
+nvidia-modelopt==0.48.0
+onnx-graphsurgeon==0.6.1
+ml_dtypes==0.7.0
+onnxslim==0.1.99
+lief==1.0.0
+polygraphy==0.53.6
+onnxscript==0.7.2
+huggingface_hub==2.4.0
